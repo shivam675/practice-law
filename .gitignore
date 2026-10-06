@@ -1,0 +1,38 @@
+# env
+.env
+.env.*
+!.env.example
+
+# go
+apps/api/bin/
+*.exe
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# node
+node_modules/
+dist/
+.vite/
+
+# data
+data/
+*.db
+*.sqlite
+
+# models / media
+models/
+*.gguf
+*.onnx
+recordings/
+
+# tooling
+.idea/
+.vscode/
+.DS_Store
+coverage.out
+*.log

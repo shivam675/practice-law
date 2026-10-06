@@ -4,12 +4,19 @@
 
 ```bash
 cp .env.example .env
-docker compose up -d postgres redis minio
-docker compose up api
+docker compose up -d postgres redis
+docker compose up -d --build api
 ```
 
 Ollama runs on the host, not in Compose, so it keeps direct GPU access.
 Containers reach it at `host.docker.internal:11434`.
+
+Blobs go to `./data/blobs` through the filesystem adapter. MinIO was dropped:
+its images now require registry authentication, and a bind-mounted directory is
+a smaller dependency. Production switches `BLOB_DRIVER` to `s3`.
+
+Postgres is published on host port 55432, because 5432 falls inside the Windows
+reserved port range on some machines. Inside the Compose network it is 5432.
 
 ## Production V1 — single box plus one GPU box
 
@@ -24,7 +31,7 @@ Containers reach it at `host.docker.internal:11434`.
    static                 |
                           +--> Postgres 17 + pgvector
                           +--> Redis
-                          +--> MinIO or S3
+                          +--> S3-compatible object storage
                           |
                           +--> gRPC --> apps/ai     (GPU box)
                           +--> ticket -> apps/media (GPU box, public WS)
@@ -61,7 +68,7 @@ Non-live traffic (login, dashboards, case reading, uploads) handles well beyond
 ## Backups
 
 - Postgres: nightly `pg_dump` plus WAL archiving to object storage.
-- MinIO or S3: versioning on, lifecycle rule matching the retention policy.
+- Object storage: versioning on, lifecycle rule matching the retention policy.
 - Restore drill before the pilot. An untested backup is not a backup.
 
 ## Observability

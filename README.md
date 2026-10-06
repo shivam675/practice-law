@@ -19,11 +19,45 @@ connects straight to the media plane. See `docs/live-session.md`.
 
 ```bash
 cp .env.example .env
-docker compose up -d postgres redis minio
-docker compose up api
+docker compose up -d postgres redis
+docker compose up -d --build api
+powershell -ExecutionPolicy Bypass -File ./scripts/smoke.ps1
 ```
 
-API health: http://localhost:8080/healthz
+| What | Where |
+|---|---|
+| API | http://localhost:8080 |
+| Health / readiness | `/healthz`, `/readyz` |
+| Postgres (from host) | `localhost:55432` |
+| Redis | `localhost:6379` |
+
+Port 5432 falls inside the Windows reserved range on some hosts, so Postgres is
+published on 55432. Inside the Compose network it is still 5432.
+
+## Working on the Go API
+
+No Go toolchain on the host is required; a `go` service runs the real one.
+
+```bash
+docker compose run --rm go build ./...
+docker compose run --rm go vet ./...
+docker compose run --rm go test ./...
+docker compose run --rm go fmt ./...
+docker compose run --rm go mod tidy
+```
+
+After a source change, restart the API:
+
+```bash
+docker compose up -d --build api
+```
+
+## Object storage
+
+Development writes blobs to `./data/blobs` through the filesystem adapter
+(`BLOB_DRIVER=filesystem`). Production uses any S3-compatible endpoint
+(`BLOB_DRIVER=s3`). MinIO is not used: its images now sit behind registry
+authentication, and a local directory is a smaller dependency than a container.
 
 ## Docs
 

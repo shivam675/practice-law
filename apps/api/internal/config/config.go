@@ -15,9 +15,9 @@ type Config struct {
 	Env      string
 	LogLevel string
 
-	HTTPAddr  string
-	PublicURL string
-	WebURL    string
+	HTTPAddr    string
+	PublicURL   string
+	WebURL      string
 	CORSOrigins []string
 
 	DatabaseURL string
@@ -29,15 +29,15 @@ type Config struct {
 	CookieDomain    string
 	CookieSecure    bool
 
-	S3Endpoint      string
-	S3Region        string
-	S3Bucket        string
-	S3AccessKey     string
-	S3SecretKey     string
+	S3Endpoint       string
+	S3Region         string
+	S3Bucket         string
+	S3AccessKey      string
+	S3SecretKey      string
 	S3ForcePathStyle bool
 
-	AIServiceURL    string
-	MediaServiceURL string
+	AIServiceURL     string
+	MediaServiceURL  string
 	MediaPublicWSURL string
 
 	MaxConcurrentLiveSessions int

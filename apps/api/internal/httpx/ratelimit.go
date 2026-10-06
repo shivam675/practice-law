@@ -14,11 +14,11 @@ import (
 // effective limit is per-replica, which is still enough to stop credential
 // stuffing. Move it to Redis when replica count makes the slack matter.
 type RateLimiter struct {
-	mu       sync.Mutex
-	buckets  map[string]*bucket
-	rate     float64 // tokens per second
-	burst    float64
-	lastGC   time.Time
+	mu      sync.Mutex
+	buckets map[string]*bucket
+	rate    float64 // tokens per second
+	burst   float64
+	lastGC  time.Time
 }
 
 type bucket struct {

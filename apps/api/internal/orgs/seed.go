@@ -75,14 +75,14 @@ type BootstrapInput struct {
 //
 // It is idempotent. Existing rows are left alone, so it is safe to run on
 // every start in development and harmless in production.
-func Bootstrap(ctx context.Context, pool *pgxpool.Pool, in BootstrapInput, log *slog.Logger) error {
+func Bootstrap(ctx context.Context, pool *pgxpool.Pool, in BootstrapInput, log *slog.Logger) (uuid.UUID, error) {
 	if in.OrgName == "" {
-		return nil
+		return uuid.Nil, nil
 	}
 
 	tx, err := pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("begin bootstrap: %w", err)
+		return uuid.Nil, fmt.Errorf("begin bootstrap: %w", err)
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
 
@@ -95,37 +95,37 @@ func Bootstrap(ctx context.Context, pool *pgxpool.Pool, in BootstrapInput, log *
 		if err := tx.QueryRow(ctx, `
 			INSERT INTO organizations (slug, name) VALUES ($1, $2) RETURNING id`,
 			slug, in.OrgName).Scan(&orgID); err != nil {
-			return fmt.Errorf("create organization: %w", err)
+			return uuid.Nil, fmt.Errorf("create organization: %w", err)
 		}
 		log.Info("bootstrap: organization created", "slug", slug)
 	case err != nil:
-		return fmt.Errorf("look up organization: %w", err)
+		return uuid.Nil, fmt.Errorf("look up organization: %w", err)
 	}
 
 	roleIDs, err := seedRoles(ctx, tx, orgID)
 	if err != nil {
-		return err
+		return uuid.Nil, err
 	}
 
 	if in.AdminEmail == "" || in.AdminPassword == "" {
 		log.Warn("bootstrap: no seed administrator configured; set SEED_ADMIN_EMAIL and SEED_ADMIN_PASSWORD")
-		return tx.Commit(ctx)
+		return orgID, tx.Commit(ctx)
 	}
 
 	adminRoleID, ok := roleIDs["admin"]
 	if !ok {
-		return fmt.Errorf("bootstrap: admin role missing after seeding")
+		return uuid.Nil, fmt.Errorf("bootstrap: admin role missing after seeding")
 	}
 
 	created, err := seedAdmin(ctx, tx, orgID, adminRoleID, in)
 	if err != nil {
-		return err
+		return uuid.Nil, err
 	}
 	if created {
 		log.Info("bootstrap: administrator created", "email", in.AdminEmail, "organization", slug)
 	}
 
-	return tx.Commit(ctx)
+	return orgID, tx.Commit(ctx)
 }
 
 func seedRoles(ctx context.Context, tx pgx.Tx, orgID uuid.UUID) (map[string]uuid.UUID, error) {

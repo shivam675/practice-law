@@ -1,33 +1,31 @@
 package main
 
 import (
-	"log/slog"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/cors"
-	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/intelimek/megamoot/apps/api/internal/audit"
+	"github.com/intelimek/megamoot/apps/api/internal/assessments"
 	"github.com/intelimek/megamoot/apps/api/internal/auth"
 	"github.com/intelimek/megamoot/apps/api/internal/authz"
-	"github.com/intelimek/megamoot/apps/api/internal/config"
 	"github.com/intelimek/megamoot/apps/api/internal/httpx"
+	"github.com/intelimek/megamoot/apps/api/internal/rubrics"
+	"github.com/intelimek/megamoot/apps/api/internal/teams"
+	"github.com/intelimek/megamoot/apps/api/internal/templates"
 	"github.com/intelimek/megamoot/apps/api/internal/users"
 )
 
-func newRouter(cfg config.Config, log *slog.Logger, pool *pgxpool.Pool,
-	authSvc *auth.Service, auditLog *audit.Logger) http.Handler {
-
+func newRouter(a *app) http.Handler {
 	r := chi.NewRouter()
 
 	r.Use(httpx.RequestID)
-	r.Use(httpx.WithLogger(log))
+	r.Use(httpx.WithLogger(a.log))
 	r.Use(httpx.Recover)
 	r.Use(httpx.AccessLog)
 	r.Use(httpx.SecurityHeaders)
 	r.Use(cors.Handler(cors.Options{
-		AllowedOrigins:   cfg.CORSOrigins,
+		AllowedOrigins:   a.cfg.CORSOrigins,
 		AllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
 		AllowedHeaders:   []string{"Authorization", "Content-Type", "X-Request-Id"},
 		ExposedHeaders:   []string{"X-Request-Id"},
@@ -35,12 +33,16 @@ func newRouter(cfg config.Config, log *slog.Logger, pool *pgxpool.Pool,
 		MaxAge:           300,
 	}))
 
-	live, ready := healthHandlers(pool)
+	live, ready := healthHandlers(a.pool)
 	r.Get("/healthz", live)
 	r.Get("/readyz", ready)
 
-	authHandlers := auth.NewHandlers(authSvc, cfg.CookieDomain, cfg.CookieSecure)
-	userHandlers := users.NewHandlers(pool, auditLog)
+	authHandlers := auth.NewHandlers(a.auth, a.cfg.CookieDomain, a.cfg.CookieSecure)
+	userHandlers := users.NewHandlers(a.pool, a.audit)
+	rubricHandlers := rubrics.NewHandlers(a.rubrics, a.audit)
+	templateHandlers := templates.NewHandlers(a.templates, a.audit)
+	teamHandlers := teams.NewHandlers(a.teams, a.audit)
+	assessmentHandlers := assessments.NewHandlers(a.assessments, a.audit)
 
 	// Credential endpoints get their own bucket. Everything else shares a
 	// looser one; per-tenant quotas arrive with usage accounting.
@@ -55,7 +57,7 @@ func newRouter(cfg config.Config, log *slog.Logger, pool *pgxpool.Pool,
 		})
 
 		r.Group(func(r chi.Router) {
-			r.Use(authSvc.Authenticate)
+			r.Use(a.auth.Authenticate)
 
 			r.Get("/me", authHandlers.Me)
 
@@ -64,6 +66,52 @@ func newRouter(cfg config.Config, log *slog.Logger, pool *pgxpool.Pool,
 				r.With(authz.Require("user.create")).Post("/", userHandlers.Create)
 				r.With(authz.Require("user.assign_role")).
 					Put("/{userID}/roles", userHandlers.SetRoles)
+			})
+
+			r.Route("/rubrics", func(r chi.Router) {
+				r.With(authz.Require("rubric.view")).Get("/", rubricHandlers.List)
+				r.With(authz.Require("rubric.view")).Get("/{rubricID}", rubricHandlers.Get)
+				r.With(authz.Require("rubric.create")).Post("/", rubricHandlers.Create)
+			})
+
+			r.Route("/templates", func(r chi.Router) {
+				r.With(authz.Require("template.view")).Get("/", templateHandlers.List)
+				r.With(authz.Require("template.create")).Post("/", templateHandlers.Create)
+				r.With(authz.Require("template.edit")).
+					Post("/{templateID}/versions", templateHandlers.CreateVersion)
+				r.With(authz.Require("template.view")).
+					Get("/versions/{versionID}", templateHandlers.GetVersion)
+				r.With(authz.Require("template.edit")).
+					Post("/versions/{versionID}/publish", templateHandlers.PublishVersion)
+			})
+
+			r.Route("/teams", func(r chi.Router) {
+				r.With(authz.Require("team.view")).Get("/", teamHandlers.List)
+				r.With(authz.Require("team.view")).Get("/{teamID}", teamHandlers.Get)
+				r.With(authz.Require("team.create")).Post("/", teamHandlers.Create)
+			})
+
+			r.Route("/assessments", func(r chi.Router) {
+				r.With(authz.Require("assessment.view")).Get("/", assessmentHandlers.List)
+				r.With(authz.Require("assessment.view")).
+					Get("/{assessmentID}", assessmentHandlers.Get)
+				r.With(authz.Require("assessment.create")).Post("/", assessmentHandlers.Create)
+				r.With(authz.Require("assessment.publish")).
+					Post("/{assessmentID}/publish", assessmentHandlers.Publish)
+				r.With(authz.Require("assessment.assign")).
+					Post("/{assessmentID}/assignments", assessmentHandlers.Assign)
+				r.With(authz.Require("assessment.view")).
+					Get("/{assessmentID}/assignments", assessmentHandlers.ListAssignments)
+			})
+
+			// A student reaches their own work here. The handler narrows the
+			// query to their own team when they lack the organisation-wide
+			// permission, so view_own cannot be used to read someone else's.
+			r.Route("/assignments", func(r chi.Router) {
+				r.With(authz.RequireAny("assessment.view", "assessment.view_own")).
+					Get("/", assessmentHandlers.ListAssignments)
+				r.With(authz.RequireAny("assessment.view", "assessment.view_own")).
+					Get("/{assignmentID}", assessmentHandlers.GetAssignment)
 			})
 		})
 	})

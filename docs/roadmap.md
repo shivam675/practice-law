@@ -24,11 +24,11 @@ Anti-cheating. Billing.
 
 | # | Milestone | Deliverable | Status |
 |---|---|---|---|
-| 1 | Foundation | Compose stack, migrations runner, config, logging, health, CI | in progress |
-| 2 | Identity | Orgs, users, argon2id, rotating refresh tokens, permissions, RBAC middleware, audit log | in progress |
-| 3 | Templates and rubrics | Template versions, stage specs, rubric engine, seeded moot template | |
-| 4 | Assessments and assignments | Teams, sides, scheduling, resources, access windows, workflow engine, scheduled transitions | |
-| 5 | Submissions | Signed upload, sandboxed parsing, format compliance checker, submission locking | |
+| 1 | Foundation | Compose stack, migrations runner, config, logging, health | **done** |
+| 2 | Identity | Orgs, users, argon2id, rotating refresh tokens, permissions, RBAC middleware, audit log | **done** |
+| 3 | Templates and rubrics | Template versions, stage specs, rubric engine, seeded moot template | **done** |
+| 4 | Assessments and assignments | Teams, sides, scheduling, access windows, workflow engine, durable scheduled transitions | **done** |
+| 5 | Submissions | Blob storage adapter, upload, sandboxed parsing, format compliance checker, submission locking | next |
 | 6 | AI plane | Harness, provider adapters, structured gate, request ledger, retrieval, per-criterion grading, quote verification | |
 | 7 | Live audio | Media ticket, audio WebSocket, VAD, reconnect and replay, device check, session actor, event log | |
 | 8 | Streaming STT | faster-whisper streaming, partials, endpointing, transcript projection, assertion ledger | |

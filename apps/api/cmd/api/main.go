@@ -14,13 +14,13 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/intelimek/megamoot/apps/api/internal/audit"
-	"github.com/intelimek/megamoot/apps/api/internal/auth"
 	"github.com/intelimek/megamoot/apps/api/internal/config"
 	"github.com/intelimek/megamoot/apps/api/internal/db"
 	"github.com/intelimek/megamoot/apps/api/internal/orgs"
+	"github.com/intelimek/megamoot/apps/api/internal/seeddata"
 	"github.com/intelimek/megamoot/apps/api/migrations"
 )
 
@@ -55,24 +55,26 @@ func run() error {
 		return err
 	}
 
-	if err := orgs.Bootstrap(ctx, pool, orgs.BootstrapInput{
+	orgID, err := orgs.Bootstrap(ctx, pool, orgs.BootstrapInput{
 		OrgName:       cfg.SeedOrgName,
 		AdminEmail:    cfg.SeedAdminEmail,
 		AdminPassword: cfg.SeedAdminPassword,
-	}, log); err != nil {
+	}, log)
+	if err != nil {
 		return err
 	}
+	if orgID != uuid.Nil {
+		if err := seeddata.Seed(ctx, pool, orgID, log); err != nil {
+			return err
+		}
+	}
 
-	auditLog := audit.New(pool, log)
-	authSvc := auth.NewService(
-		auth.NewStore(pool),
-		auth.NewTokenIssuer(cfg.JWTSigningKey, cfg.PublicURL, cfg.AccessTokenTTL, cfg.RefreshTokenTTL),
-		auditLog,
-	)
+	application := newApp(cfg, log, pool)
+	application.startBackground(ctx)
 
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           newRouter(cfg, log, pool, authSvc, auditLog),
+		Handler:           newRouter(application),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		// Long enough for a large report payload, short enough that a stalled

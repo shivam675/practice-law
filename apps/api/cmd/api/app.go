@@ -8,11 +8,14 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/intelimek/megamoot/apps/api/internal/aiclient"
 	"github.com/intelimek/megamoot/apps/api/internal/assessments"
 	"github.com/intelimek/megamoot/apps/api/internal/audit"
 	"github.com/intelimek/megamoot/apps/api/internal/auth"
+	"github.com/intelimek/megamoot/apps/api/internal/blob"
 	"github.com/intelimek/megamoot/apps/api/internal/config"
 	"github.com/intelimek/megamoot/apps/api/internal/rubrics"
+	"github.com/intelimek/megamoot/apps/api/internal/submissions"
 	"github.com/intelimek/megamoot/apps/api/internal/teams"
 	"github.com/intelimek/megamoot/apps/api/internal/templates"
 	"github.com/intelimek/megamoot/apps/api/internal/workflow"
@@ -29,13 +32,16 @@ type app struct {
 	auth        *auth.Service
 	engine      *workflow.Engine
 	scheduler   *workflow.Scheduler
+	blobs       blob.Store
+	ai          *aiclient.Client
 	rubrics     *rubrics.Store
 	templates   *templates.Store
 	teams       *teams.Store
 	assessments *assessments.Store
+	submissions *submissions.Store
 }
 
-func newApp(cfg config.Config, log *slog.Logger, pool *pgxpool.Pool) *app {
+func newApp(cfg config.Config, log *slog.Logger, pool *pgxpool.Pool) (*app, error) {
 	auditLog := audit.New(pool, log)
 
 	a := &app{
@@ -55,13 +61,23 @@ func newApp(cfg config.Config, log *slog.Logger, pool *pgxpool.Pool) *app {
 	a.engine = workflow.NewEngine(pool, auditLog, log)
 	a.scheduler = workflow.NewScheduler(a.engine, log, uuid.NewString())
 
+	blobs, err := blob.Open(cfg.BlobDriver, cfg.BlobFSRoot)
+	if err != nil {
+		return nil, err
+	}
+	a.blobs = blobs
+	log.Info("blob store ready", "store", blobs.Describe())
+
+	a.ai = aiclient.New(cfg.AIServiceURL, cfg.AIServiceToken)
+
 	a.rubrics = rubrics.NewStore(pool)
 	a.templates = templates.NewStore(pool, a.rubrics)
 	a.teams = teams.NewStore(pool)
 	a.assessments = assessments.NewStore(pool, a.templates, a.teams, a.engine)
+	a.submissions = submissions.NewStore(pool, a.blobs, a.ai, a.templates, a.engine)
 
 	a.engine.SetHook(a.onTransition)
-	return a
+	return a, nil
 }
 
 // onTransition is how one state machine drives another. A stage becoming

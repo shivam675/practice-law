@@ -29,6 +29,8 @@ type Config struct {
 	CookieDomain    string
 	CookieSecure    bool
 
+	BlobDriver       string
+	BlobFSRoot       string
 	S3Endpoint       string
 	S3Region         string
 	S3Bucket         string
@@ -37,6 +39,7 @@ type Config struct {
 	S3ForcePathStyle bool
 
 	AIServiceURL     string
+	AIServiceToken   string
 	MediaServiceURL  string
 	MediaPublicWSURL string
 
@@ -66,13 +69,16 @@ func Load() (Config, error) {
 
 		CookieDomain: env("COOKIE_DOMAIN", "localhost"),
 
-		S3Endpoint:  env("S3_ENDPOINT", "http://minio:9000"),
+		BlobDriver:  env("BLOB_DRIVER", "filesystem"),
+		BlobFSRoot:  env("BLOB_FS_ROOT", "/var/lib/megamoot/blobs"),
+		S3Endpoint:  env("S3_ENDPOINT", ""),
 		S3Region:    env("S3_REGION", "us-east-1"),
 		S3Bucket:    env("S3_BUCKET", "megamoot"),
 		S3AccessKey: env("S3_ACCESS_KEY", ""),
 		S3SecretKey: env("S3_SECRET_KEY", ""),
 
 		AIServiceURL:     env("AI_SERVICE_URL", "http://ai:8100"),
+		AIServiceToken:   env("AI_SERVICE_TOKEN", ""),
 		MediaServiceURL:  env("MEDIA_SERVICE_URL", "http://media:8200"),
 		MediaPublicWSURL: env("MEDIA_PUBLIC_WS_URL", "ws://localhost:8200"),
 
@@ -111,6 +117,13 @@ func Load() (Config, error) {
 
 	if c.IsProduction() && !c.CookieSecure {
 		return c, fmt.Errorf("COOKIE_SECURE must be true in production")
+	}
+
+	if c.AIServiceToken == "" {
+		return c, fmt.Errorf("AI_SERVICE_TOKEN is required; it authenticates the control plane to the AI plane")
+	}
+	if c.IsProduction() && strings.Contains(c.AIServiceToken, "change_me") {
+		return c, fmt.Errorf("AI_SERVICE_TOKEN still holds the development placeholder")
 	}
 
 	return c, nil

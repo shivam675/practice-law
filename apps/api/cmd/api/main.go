@@ -69,7 +69,10 @@ func run() error {
 		}
 	}
 
-	application := newApp(cfg, log, pool)
+	application, err := newApp(cfg, log, pool)
+	if err != nil {
+		return err
+	}
 	application.startBackground(ctx)
 
 	srv := &http.Server{

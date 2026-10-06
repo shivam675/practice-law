@@ -28,8 +28,8 @@ Anti-cheating. Billing.
 | 2 | Identity | Orgs, users, argon2id, rotating refresh tokens, permissions, RBAC middleware, audit log | **done** |
 | 3 | Templates and rubrics | Template versions, stage specs, rubric engine, seeded moot template | **done** |
 | 4 | Assessments and assignments | Teams, sides, scheduling, access windows, workflow engine, durable scheduled transitions | **done** |
-| 5 | Submissions | Blob storage adapter, upload, sandboxed parsing, format compliance checker, submission locking | next |
-| 6 | AI plane | Harness, provider adapters, structured gate, request ledger, retrieval, per-criterion grading, quote verification | |
+| 5 | Submissions | Blob storage adapter, upload, sandboxed parsing, format compliance checker, submission locking | **done** |
+| 6 | AI plane | Harness, provider adapters, structured gate, request ledger, retrieval, per-criterion grading, quote verification | after the UI |
 | 7 | Live audio | Media ticket, audio WebSocket, VAD, reconnect and replay, device check, session actor, event log | |
 | 8 | Streaming STT | faster-whisper streaming, partials, endpointing, transcript projection, assertion ledger | |
 | 9 | Judge | Question bank generation, monitor tier, coordinator, speaking floor, barge-in | |
@@ -37,6 +37,10 @@ Anti-cheating. Billing.
 | 11 | Evaluation | Session evaluation, consolidation, scoring in code, degraded-session handling | |
 | 12 | Reports | Report composer, student view, evidence display, publish transition | |
 | 13 | Teacher tools | Monitoring, review queue, override with reason, report annotation | |
+
+The web application is being brought forward: screens for milestones 1 to 5
+exist to build against, and early feedback on the live-session layout is worth
+more than another backend milestone.
 | 14 | Hardening | Tenant isolation tests, load test at 5 sessions, failure injection, retention jobs | |
 | 15 | Deploy | Caddy, GPU box provisioning, backups and restore drill, runbook | |
 

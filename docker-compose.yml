@@ -13,6 +13,7 @@ services:
       - "55432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    networks: [edge]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-megamoot} -d ${POSTGRES_DB:-megamoot}"]
       interval: 5s
@@ -25,6 +26,7 @@ services:
     command: ["redis-server", "--appendonly", "no", "--save", ""]
     ports:
       - "6379:6379"
+    networks: [edge]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -41,24 +43,47 @@ services:
     environment:
       POSTGRES_HOST: postgres
       REDIS_URL: redis://redis:6379/0
+      AI_SERVICE_URL: http://ai:8100
     ports:
       - "8080:8080"
     volumes:
       - ./apps/api:/src
       - ./data/blobs:/var/lib/megamoot/blobs
       - gomodcache:/go/pkg/mod
+    networks: [edge, parsing]
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
+      ai:
+        condition: service_started
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
+  # The only service that parses attacker-supplied binary formats. It sits on
+  # a network with no route out, cannot write to its own filesystem, and is
+  # capped on memory and processes. See docs/security.md.
+  ai:
+    build:
+      context: ./apps/ai
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      AI_SERVICE_TOKEN: ${AI_SERVICE_TOKEN:-dev_ai_service_token_change_me}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    networks: [parsing]
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m
+    mem_limit: 1g
+    pids_limit: 128
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+
   # Go toolchain without installing Go on the host.
   #   docker compose run --rm go build ./...
-  #   docker compose run --rm go test ./...
-  # Not started by `docker compose up` because of the tools profile.
   go:
     image: golang:1.23-alpine
     profiles: ["tools"]
@@ -66,12 +91,32 @@ services:
     environment:
       CGO_ENABLED: "0"
       GOFLAGS: -buildvcs=false
-      DATABASE_URL: postgres://${POSTGRES_USER:-megamoot}:${POSTGRES_PASSWORD:-megamoot_dev_password}@postgres:5432/${POSTGRES_DB:-megamoot}_test?sslmode=disable
     volumes:
       - ./apps/api:/src
       - gomodcache:/go/pkg/mod
       - gobuildcache:/root/.cache/go-build
+    networks: [edge]
     entrypoint: ["go"]
+
+  # Python test runner for the AI plane.
+  #   docker compose run --rm py -q
+  py:
+    build:
+      context: ./apps/ai
+      dockerfile: Dockerfile
+    profiles: ["tools"]
+    user: root
+    working_dir: /srv
+    volumes:
+      - ./apps/ai:/srv
+    networks: [edge]
+    entrypoint: ["sh", "-c", "pip install --quiet pytest && exec pytest \"$$@\"", "--"]
+
+networks:
+  edge:
+  # No route out. Containers here reach each other and nothing else.
+  parsing:
+    internal: true
 
 volumes:
   pgdata:

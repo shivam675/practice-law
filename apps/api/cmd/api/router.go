@@ -11,6 +11,7 @@ import (
 	"github.com/intelimek/megamoot/apps/api/internal/authz"
 	"github.com/intelimek/megamoot/apps/api/internal/httpx"
 	"github.com/intelimek/megamoot/apps/api/internal/rubrics"
+	"github.com/intelimek/megamoot/apps/api/internal/submissions"
 	"github.com/intelimek/megamoot/apps/api/internal/teams"
 	"github.com/intelimek/megamoot/apps/api/internal/templates"
 	"github.com/intelimek/megamoot/apps/api/internal/users"
@@ -43,6 +44,7 @@ func newRouter(a *app) http.Handler {
 	templateHandlers := templates.NewHandlers(a.templates, a.audit)
 	teamHandlers := teams.NewHandlers(a.teams, a.audit)
 	assessmentHandlers := assessments.NewHandlers(a.assessments, a.audit)
+	submissionHandlers := submissions.NewHandlers(a.submissions, a.audit)
 
 	// Credential endpoints get their own bucket. Everything else shares a
 	// looser one; per-tenant quotas arrive with usage accounting.
@@ -112,6 +114,18 @@ func newRouter(a *app) http.Handler {
 					Get("/", assessmentHandlers.ListAssignments)
 				r.With(authz.RequireAny("assessment.view", "assessment.view_own")).
 					Get("/{assignmentID}", assessmentHandlers.GetAssignment)
+
+				// Uploading requires team membership as well as the
+				// permission; the handler checks it.
+				r.With(authz.Require("submission.upload")).
+					Post("/{assignmentID}/stages/{stageID}/submissions", submissionHandlers.Upload)
+				r.With(authz.RequireAny("submission.view", "submission.view_own")).
+					Get("/{assignmentID}/submissions", submissionHandlers.List)
+			})
+
+			r.Route("/submissions", func(r chi.Router) {
+				r.With(authz.RequireAny("submission.view", "submission.view_own")).
+					Get("/{artifactID}/download", submissionHandlers.Download)
 			})
 		})
 	})

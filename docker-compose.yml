@@ -82,6 +82,24 @@ services:
     security_opt:
       - no-new-privileges:true
 
+  web:
+    build:
+      context: ./apps/web
+      dockerfile: Dockerfile
+      target: dev
+    restart: unless-stopped
+    environment:
+      VITE_API_PROXY: http://api:8080
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./apps/web:/app
+      - webmodules:/app/node_modules
+    networks: [edge]
+    depends_on:
+      api:
+        condition: service_started
+
   # Go toolchain without installing Go on the host.
   #   docker compose run --rm go build ./...
   go:
@@ -120,5 +138,6 @@ networks:
 
 volumes:
   pgdata:
+  webmodules:
   gomodcache:
   gobuildcache:

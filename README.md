@@ -10,7 +10,7 @@ Moot court is the first assessment type, not the architecture.
 | Control | `apps/api` | Go | auth, RBAC, tenancy, workflow state machine, timers, session events, persistence |
 | AI | `apps/ai` | Python | grading, report generation, judge agents, retrieval |
 | Media | `apps/media` | Python (GPU) | live audio, VAD, STT, TTS, monitor tier |
-| Client | `apps/web` | React + TS | student / teacher / admin UIs, live session room |
+| Client | `apps/web` | React + TS | student / teacher UIs, live session room |
 
 Audio never routes through Go. Go issues a short-lived media ticket; the browser
 connects straight to the media plane. See `docs/live-session.md`.
@@ -34,6 +34,7 @@ npm run smoke
 
 | What | Where |
 |---|---|
+| Web | http://localhost:5173 |
 | API | http://localhost:8080 |
 | Health / readiness | `/healthz`, `/readyz` |
 | Postgres (from host) | `localhost:55432` |
@@ -52,8 +53,9 @@ No Go toolchain on the host is required; a container runs the real one.
 | `npm run up` | Same, detached |
 | `npm run logs` | Follow API logs |
 | `npm run smoke` | End-to-end auth and permission checks |
-| `npm run check` | fmt, vet and tests |
-| `npm test` | Go tests |
+| `npm run check` | fmt, vet, tests and typecheck |
+| `npm test` | Go and Python tests |
+| `npm run typecheck` | Web TypeScript |
 | `npm run build` | Compile |
 | `npm run tidy` | Resolve dependencies |
 | `npm run psql` | Postgres shell |
@@ -84,5 +86,6 @@ authentication, and a local directory is a smaller dependency than a container.
 | `docs/ai-harness.md` | model tiers, profiles, coordinator, grading contract |
 | `docs/security.md` | threat model and controls |
 | `docs/deployment.md` | dev + single-GPU production topology |
+| `docs/design-system.md` | tokens, type, colour and the decisions behind them |
 | `docs/roadmap.md` | milestones |
 | `docs/adr/` | architecture decision records |

@@ -86,22 +86,34 @@ $refreshed = Invoke-RestMethod "$base/api/v1/auth/refresh" -Method Post -WebSess
 if (-not $refreshed.access_token) { Fail 'refresh returned no token' }
 Pass 'refresh issued a new access token'
 
-Step 'refresh token reuse detection'
+Step 'concurrent refresh is tolerated inside the grace window'
+# Two tabs restoring a session at once replay the same cookie. Treating that
+# as theft would sign the student out of both, so a replay within the grace
+# window is re-issued instead of revoking.
+$raced = New-Object Microsoft.PowerShell.Commands.WebRequestSession
+$raced.Cookies.Add($cookie)
+$racedResult = Invoke-RestMethod "$base/api/v1/auth/refresh" -Method Post -WebSession $raced
+if (-not $racedResult.access_token) { Fail 'a raced refresh returned no token' }
+Pass 'an immediate replay is re-issued rather than revoking the session'
+
+Step 'replay outside the grace window revokes the family'
+Write-Host "       waiting out the 10s grace window" -ForegroundColor DarkGray
+Start-Sleep -Seconds 11
 $stale = New-Object Microsoft.PowerShell.Commands.WebRequestSession
 $stale.Cookies.Add($cookie)
 try {
     Invoke-RestMethod "$base/api/v1/auth/refresh" -Method Post -WebSession $stale | Out-Null
-    Fail 'replayed refresh token was accepted'
+    Fail 'a replay outside the grace window was accepted'
 } catch {
     if ($_.Exception.Response.StatusCode.value__ -ne 401) { Fail "expected 401, got $($_.Exception.Response.StatusCode.value__)" }
-    Pass 'replayed refresh token rejected and family revoked'
+    Pass 'a late replay is rejected and the family revoked'
 }
 
 try {
     Invoke-RestMethod "$base/api/v1/auth/refresh" -Method Post -WebSession $session | Out-Null
-    Fail 'rotated token still works after reuse detection'
+    Fail 'a rotated token still works after reuse was detected'
 } catch {
-    Pass 'whole token family revoked after replay'
+    Pass 'every token in the family is revoked'
 }
 
 Step 'login rate limit'

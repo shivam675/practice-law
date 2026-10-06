@@ -18,6 +18,18 @@ import (
 const (
 	loginFailureThreshold = 10
 	loginLockDuration     = 15 * time.Minute
+
+	// refreshReuseGrace is how long after a refresh a replay of the same token
+	// is treated as the client racing itself rather than as theft.
+	//
+	// Strict rotation without this is unusable: two browser tabs restoring a
+	// session at once, a double-clicked retry, or a React development double
+	// mount all replay the same cookie within milliseconds and would log the
+	// user out of both tabs. The cost is a narrow window in which a stolen
+	// token still works, which is a far smaller risk than a product that signs
+	// students out mid-assessment. Replays outside the window still revoke the
+	// whole family. See docs/security.md.
+	refreshReuseGrace = 10 * time.Second
 )
 
 type Service struct {
@@ -174,22 +186,43 @@ func (s *Service) Refresh(ctx context.Context, plain, userAgent string, ip net.I
 		return Tokens{}, err
 	}
 	if !consumed {
-		// Replay. Treat the whole family as compromised.
-		if rerr := s.store.RevokeFamily(ctx, rec.FamilyID, "refresh_token_reuse"); rerr != nil {
-			httpx.LoggerFrom(ctx).Error("revoke family after reuse", "error", rerr)
+		raced, werr := s.store.UsedWithin(ctx, rec.ID, refreshReuseGrace)
+		if werr != nil {
+			httpx.LoggerFrom(ctx).Error("check refresh reuse window", "error", werr)
 		}
+
+		if !raced {
+			// Replay outside the grace window. Treat the family as compromised.
+			if rerr := s.store.RevokeFamily(ctx, rec.FamilyID, "refresh_token_reuse"); rerr != nil {
+				httpx.LoggerFrom(ctx).Error("revoke family after reuse", "error", rerr)
+			}
+			s.audit.Record(ctx, audit.Entry{
+				OrganizationID: &rec.OrganizationID,
+				ActorUserID:    &rec.UserID,
+				Action:         "auth.refresh.reuse_detected",
+				TargetKind:     "user",
+				TargetID:       &rec.UserID,
+				Reason:         "refresh token presented twice outside the grace window",
+				RequestID:      requestID,
+				IP:             ip,
+			})
+			return Tokens{}, httpx.Err(http.StatusUnauthorized, "token_reuse",
+				"Session invalidated. Sign in again.")
+		}
+
+		// Inside the window: issue a fresh token in the same family rather
+		// than ending the session. Recorded, because a burst of these is worth
+		// looking at even when each one is benign.
 		s.audit.Record(ctx, audit.Entry{
 			OrganizationID: &rec.OrganizationID,
 			ActorUserID:    &rec.UserID,
-			Action:         "auth.refresh.reuse_detected",
+			Action:         "auth.refresh.raced",
 			TargetKind:     "user",
 			TargetID:       &rec.UserID,
-			Reason:         "refresh token presented twice",
+			Reason:         "concurrent refresh inside the grace window",
 			RequestID:      requestID,
 			IP:             ip,
 		})
-		return Tokens{}, httpx.Err(http.StatusUnauthorized, "token_reuse",
-			"Session invalidated. Sign in again.")
 	}
 
 	user, err := s.store.UserByID(ctx, rec.UserID)

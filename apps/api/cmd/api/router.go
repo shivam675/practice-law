@@ -121,6 +121,8 @@ func newRouter(a *app) http.Handler {
 					Post("/{assignmentID}/stages/{stageID}/submissions", submissionHandlers.Upload)
 				r.With(authz.RequireAny("submission.view", "submission.view_own")).
 					Get("/{assignmentID}/submissions", submissionHandlers.List)
+				r.With(authz.RequireAny("knowledge.view", "assessment.view_own")).
+					Get("/{assignmentID}/resources", assessmentHandlers.Resources)
 			})
 
 			r.Route("/submissions", func(r chi.Router) {

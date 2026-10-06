@@ -38,6 +38,17 @@ Anti-cheating. Billing.
 | 12 | Reports | Report composer, student view, evidence display, publish transition | |
 | 13 | Teacher tools | Monitoring, review queue, override with reason, report annotation | |
 
+## Web application
+
+Brought forward ahead of milestone 6, because early feedback on the layouts is
+worth more than another backend milestone. Shipped: sign in, student work list,
+assignment detail with the stage timeline, the case materials reader, memorial
+upload with the structure report rendered as findings, teacher assessment and
+team management, and the oral round room as a layout shell.
+
+Not yet built: the template editor (templates are created through the API and
+reviewed read-only), user administration, rubric editing, reports.
+
 The web application is being brought forward: screens for milestones 1 to 5
 exist to build against, and early feedback on the live-session layout is worth
 more than another backend milestone.

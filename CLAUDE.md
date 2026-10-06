@@ -7,9 +7,9 @@ architecture. Read `docs/architecture.md` before any structural change.
 
 ```
 apps/api      Go control plane: auth, RBAC, tenancy, workflow, sessions
-apps/ai       Python, stateless: grading, reports, judge agents   (not built yet)
+apps/ai       Python, stateless: document extraction; grading next
 apps/media    Python, GPU: VAD, STT, TTS, monitor tier            (not built yet)
-apps/web      React + TypeScript                                   (not built yet)
+apps/web      React + TypeScript + Tailwind v4
 packages/contracts  protobuf, shared across all three             (not built yet)
 infra         compose, proxy, deployment
 docs          architecture, domain model, state machine, ADRs
@@ -48,6 +48,11 @@ docker run --rm -v "//x/megamoot/apps/api":/src -w /src golang:1.23-alpine \
    hostile input. See `docs/security.md`.
 8. **Evidence quotes are verified against the source** before they reach a
    student.
+9. **The web app is light mode only** and reads its colours from the tokens in
+   `apps/web/src/styles/app.css`. No hard-coded hex values in components. See
+   `docs/design-system.md`.
+10. **The access token lives in memory only.** Never `localStorage`. The
+    refresh cookie is httpOnly and the client never reads it.
 
 ## Conventions
 

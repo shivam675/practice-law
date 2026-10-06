@@ -171,6 +171,25 @@ func (s *Store) ConsumeRefreshToken(ctx context.Context, id uuid.UUID) (bool, er
 	return tag.RowsAffected() == 1, nil
 }
 
+// UsedWithin reports whether a token was consumed inside the given window.
+//
+// It distinguishes two cases that look identical at the database: a client
+// that raced itself, and a stolen token replayed later. See the grace window
+// in Service.Refresh.
+func (s *Store) UsedWithin(ctx context.Context, id uuid.UUID, window time.Duration) (bool, error) {
+	var within bool
+	err := s.pool.QueryRow(ctx, `
+		SELECT used_at IS NOT NULL AND used_at > now() - $2::interval
+		FROM refresh_tokens WHERE id = $1`, id, window.String()).Scan(&within)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, ErrNotFound
+	}
+	if err != nil {
+		return false, fmt.Errorf("check refresh token reuse window: %w", err)
+	}
+	return within, nil
+}
+
 // RevokeFamily kills every token descended from one login. Called on logout
 // and, more importantly, on detected replay.
 func (s *Store) RevokeFamily(ctx context.Context, familyID uuid.UUID, reason string) error {

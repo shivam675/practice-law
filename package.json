@@ -19,10 +19,11 @@
     "test": "npm run test:go && npm run test:py",
     "test:go": "docker compose run --rm go test ./...",
     "test:py": "docker compose run --rm py -q",
+    "typecheck": "docker compose run --rm --no-deps web npm run typecheck",
     "vet": "docker compose run --rm go vet ./...",
     "fmt": "docker compose run --rm go fmt ./...",
     "tidy": "docker compose run --rm go mod tidy",
-    "check": "npm run fmt && npm run vet && npm run test",
+    "check": "npm run fmt && npm run vet && npm run test && npm run typecheck",
     "psql": "docker compose exec postgres psql -U megamoot -d megamoot",
     "migrate:status": "docker compose exec postgres psql -U megamoot -d megamoot -c \"SELECT version, applied_at FROM schema_migrations ORDER BY version\""
   }

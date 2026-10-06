@@ -43,6 +43,22 @@ npm run smoke
 Port 5432 falls inside the Windows reserved range on some hosts, so Postgres is
 published on 55432. Inside the Compose network it is still 5432.
 
+## Demo accounts
+
+Seeded on first start, development only. `SEED_DEMO_PASSWORD` is refused in
+production and `SEED_SUPERADMIN_PASSWORD` must be at least 16 characters there.
+
+| Level | Sign in with | Password |
+|---|---|---|
+| Super administrator | `suadmin` | `admin123` |
+| Organisation administrator | `admin@demo.test` | `ChangeMe123!` |
+| Teacher | `teacher@demo.test` | `student123` |
+| Student, speaker 1 | `student1@demo.test` | `student123` |
+| Student, speaker 2 | `student2@demo.test` | `student123` |
+
+The two students share `Demo Team`, which matches the moot template's
+two-speaker shape and can be assigned without any further setup.
+
 ## Scripts
 
 No Go toolchain on the host is required; a container runs the real one.

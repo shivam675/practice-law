@@ -45,6 +45,7 @@ type Config struct {
 
 	MaxConcurrentLiveSessions int
 
+	SeedDemoPassword       string
 	SeedSuperAdminEmail    string
 	SeedSuperAdminPassword string
 
@@ -85,6 +86,7 @@ func Load() (Config, error) {
 		MediaServiceURL:  env("MEDIA_SERVICE_URL", "http://media:8200"),
 		MediaPublicWSURL: env("MEDIA_PUBLIC_WS_URL", "ws://localhost:8200"),
 
+		SeedDemoPassword:       env("SEED_DEMO_PASSWORD", ""),
 		SeedSuperAdminEmail:    env("SEED_SUPERADMIN_EMAIL", ""),
 		SeedSuperAdminPassword: env("SEED_SUPERADMIN_PASSWORD", ""),
 
@@ -123,6 +125,12 @@ func Load() (Config, error) {
 
 	if c.IsProduction() && !c.CookieSecure {
 		return c, fmt.Errorf("COOKIE_SECURE must be true in production")
+	}
+
+	// Shared demo credentials are a development convenience. In production
+	// they would be a published set of working logins.
+	if c.IsProduction() && c.SeedDemoPassword != "" {
+		return c, fmt.Errorf("SEED_DEMO_PASSWORD must be unset in production")
 	}
 
 	// The seeded super administrator is a development convenience. Shipping

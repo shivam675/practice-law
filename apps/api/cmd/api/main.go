@@ -70,6 +70,9 @@ func run() error {
 		if err := seeddata.Seed(ctx, pool, orgID, log); err != nil {
 			return err
 		}
+		if err := seeddata.SeedPeople(ctx, pool, orgID, cfg.SeedDemoPassword, log); err != nil {
+			return err
+		}
 	}
 
 	application, err := newApp(cfg, log, pool)

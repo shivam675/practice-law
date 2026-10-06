@@ -1,0 +1,26 @@
+# Hot reload for the development container. Rebuilds and restarts the binary
+# on save; the image itself is only rebuilt when dependencies change.
+root = "."
+tmp_dir = ".air"
+
+[build]
+  cmd = "go build -o ./.air/api ./cmd/api"
+  bin = "./.air/api"
+  include_ext = ["go", "sql", "tmpl"]
+  exclude_dir = [".air", "bin"]
+  exclude_regex = ["_test\\.go"]
+  delay = 300
+  # Windows bind mounts do not propagate inotify events into the container,
+  # so the watcher polls instead.
+  poll = true
+  poll_interval = 500
+  stop_on_error = false
+  send_interrupt = true
+  kill_delay = "2s"
+
+[log]
+  main_only = false
+  time = false
+
+[misc]
+  clean_on_exit = true

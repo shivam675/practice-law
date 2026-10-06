@@ -1,0 +1,24 @@
+{
+  "name": "megamoot",
+  "private": true,
+  "version": "0.1.0",
+  "description": "AI Live Assessment Platform",
+  "scripts": {
+    "dev": "docker compose up --build",
+    "up": "docker compose up -d --build",
+    "stop": "docker compose down",
+    "restart": "docker compose restart api",
+    "reset": "docker compose down -v",
+    "logs": "docker compose logs -f api",
+    "ps": "docker compose ps",
+    "smoke": "powershell -ExecutionPolicy Bypass -File ./scripts/smoke.ps1",
+    "build": "docker compose run --rm go build ./...",
+    "test": "docker compose run --rm go test ./...",
+    "vet": "docker compose run --rm go vet ./...",
+    "fmt": "docker compose run --rm go fmt ./...",
+    "tidy": "docker compose run --rm go mod tidy",
+    "check": "npm run fmt && npm run vet && npm run test",
+    "psql": "docker compose exec postgres psql -U megamoot -d megamoot",
+    "migrate:status": "docker compose exec postgres psql -U megamoot -d megamoot -c \"SELECT version, applied_at FROM schema_migrations ORDER BY version\""
+  }
+}

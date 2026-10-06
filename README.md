@@ -19,9 +19,17 @@ connects straight to the media plane. See `docs/live-session.md`.
 
 ```bash
 cp .env.example .env
-docker compose up -d postgres redis
-docker compose up -d --build api
-powershell -ExecutionPolicy Bypass -File ./scripts/smoke.ps1
+npm run dev
+```
+
+That is the whole loop. `npm run dev` brings up Postgres, Redis and the API in
+the foreground and streams logs; saving a Go file rebuilds and restarts the
+server in about a second. Ctrl+C stops everything.
+
+In a second terminal:
+
+```bash
+npm run smoke
 ```
 
 | What | Where |
@@ -34,23 +42,29 @@ powershell -ExecutionPolicy Bypass -File ./scripts/smoke.ps1
 Port 5432 falls inside the Windows reserved range on some hosts, so Postgres is
 published on 55432. Inside the Compose network it is still 5432.
 
-## Working on the Go API
+## Scripts
 
-No Go toolchain on the host is required; a `go` service runs the real one.
+No Go toolchain on the host is required; a container runs the real one.
 
-```bash
-docker compose run --rm go build ./...
-docker compose run --rm go vet ./...
-docker compose run --rm go test ./...
-docker compose run --rm go fmt ./...
-docker compose run --rm go mod tidy
-```
+| Command | What it does |
+|---|---|
+| `npm run dev` | Full stack in the foreground, hot reload, Ctrl+C to stop |
+| `npm run up` | Same, detached |
+| `npm run logs` | Follow API logs |
+| `npm run smoke` | End-to-end auth and permission checks |
+| `npm run check` | fmt, vet and tests |
+| `npm test` | Go tests |
+| `npm run build` | Compile |
+| `npm run tidy` | Resolve dependencies |
+| `npm run psql` | Postgres shell |
+| `npm run migrate:status` | Applied migrations |
+| `npm run restart` | Restart the API container |
+| `npm run stop` | Stop everything, keep data |
+| `npm run reset` | Stop everything and drop volumes |
 
-After a source change, restart the API:
-
-```bash
-docker compose up -d --build api
-```
+The image is only rebuilt when `go.mod` changes. Everything else is picked up
+by the file watcher, which polls because Windows bind mounts do not propagate
+inotify events.
 
 ## Object storage
 

@@ -68,6 +68,10 @@ type BootstrapInput struct {
 	OrgName       string
 	AdminEmail    string
 	AdminPassword string
+	// Platform-level operator. Optional; left unset, no super administrator
+	// exists and nothing can reach the platform permissions.
+	SuperAdminEmail    string
+	SuperAdminPassword string
 }
 
 // Bootstrap makes a fresh database usable: one organisation, the system roles
@@ -120,6 +124,17 @@ func Bootstrap(ctx context.Context, pool *pgxpool.Pool, in BootstrapInput, log *
 	created, err := seedAdmin(ctx, tx, orgID, adminRoleID, in)
 	if err != nil {
 		return uuid.Nil, err
+	}
+
+	if in.SuperAdminEmail != "" && in.SuperAdminPassword != "" {
+		madeSuper, err := seedSuperAdmin(ctx, tx, orgID, in)
+		if err != nil {
+			return uuid.Nil, err
+		}
+		if madeSuper {
+			log.Warn("bootstrap: super administrator created; change this password",
+				"identifier", in.SuperAdminEmail)
+		}
 	}
 	if created {
 		log.Info("bootstrap: administrator created", "email", in.AdminEmail, "organization", slug)
@@ -213,6 +228,73 @@ func seedAdmin(ctx context.Context, tx pgx.Tx, orgID, adminRoleID uuid.UUID, in 
 		`INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
 		userID, adminRoleID); err != nil {
 		return false, fmt.Errorf("grant admin role: %w", err)
+	}
+
+	return true, nil
+}
+
+// seedSuperAdmin creates the platform-level role and operator.
+//
+// The role carries organization_id NULL, so it is owned by no tenant, and it
+// holds every permission including the platform ones that organisation admins
+// can never be granted. Permission resolution does not filter by tenant, so a
+// single row grants it to a user who still lives inside one organisation.
+func seedSuperAdmin(ctx context.Context, tx pgx.Tx, orgID uuid.UUID, in BootstrapInput) (bool, error) {
+	var roleID uuid.UUID
+	err := tx.QueryRow(ctx, `
+		INSERT INTO roles (organization_id, key, name, description, is_system)
+		VALUES (NULL, 'super_admin', 'Super Administrator',
+		        'Platform operator. Owned by no organisation.', true)
+		ON CONFLICT (key) WHERE organization_id IS NULL
+		DO UPDATE SET name = EXCLUDED.name
+		RETURNING id`).Scan(&roleID)
+	if err != nil {
+		return false, fmt.Errorf("upsert super_admin role: %w", err)
+	}
+
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO role_permissions (role_id, permission_key)
+		SELECT $1, key FROM permissions
+		ON CONFLICT DO NOTHING`, roleID); err != nil {
+		return false, fmt.Errorf("grant every permission to super_admin: %w", err)
+	}
+
+	identifier := auth.NormalizeEmail(in.SuperAdminEmail)
+
+	var userID uuid.UUID
+	err = tx.QueryRow(ctx,
+		`SELECT id FROM users WHERE email_normalized = $1`, identifier).Scan(&userID)
+	if err == nil {
+		// Never reset an existing password, even this one.
+		if _, gerr := tx.Exec(ctx,
+			`INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+			userID, roleID); gerr != nil {
+			return false, fmt.Errorf("grant super_admin role: %w", gerr)
+		}
+		return false, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return false, fmt.Errorf("look up super administrator: %w", err)
+	}
+
+	hash, err := auth.HashPassword(in.SuperAdminPassword)
+	if err != nil {
+		return false, fmt.Errorf("hash super administrator password: %w", err)
+	}
+
+	if err := tx.QueryRow(ctx, `
+		INSERT INTO users (organization_id, email, email_normalized, full_name,
+		                   password_hash, status)
+		VALUES ($1, $2, $3, 'Super Administrator', $4, 'active')
+		RETURNING id`,
+		orgID, strings.TrimSpace(in.SuperAdminEmail), identifier, hash).Scan(&userID); err != nil {
+		return false, fmt.Errorf("create super administrator: %w", err)
+	}
+
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+		userID, roleID); err != nil {
+		return false, fmt.Errorf("grant super_admin role: %w", err)
 	}
 
 	return true, nil

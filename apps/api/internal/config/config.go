@@ -45,6 +45,9 @@ type Config struct {
 
 	MaxConcurrentLiveSessions int
 
+	SeedSuperAdminEmail    string
+	SeedSuperAdminPassword string
+
 	SeedOrgName       string
 	SeedAdminEmail    string
 	SeedAdminPassword string
@@ -82,6 +85,9 @@ func Load() (Config, error) {
 		MediaServiceURL:  env("MEDIA_SERVICE_URL", "http://media:8200"),
 		MediaPublicWSURL: env("MEDIA_PUBLIC_WS_URL", "ws://localhost:8200"),
 
+		SeedSuperAdminEmail:    env("SEED_SUPERADMIN_EMAIL", ""),
+		SeedSuperAdminPassword: env("SEED_SUPERADMIN_PASSWORD", ""),
+
 		SeedOrgName:       env("SEED_ORG_NAME", "Demo Law School"),
 		SeedAdminEmail:    env("SEED_ADMIN_EMAIL", ""),
 		SeedAdminPassword: env("SEED_ADMIN_PASSWORD", ""),
@@ -117,6 +123,15 @@ func Load() (Config, error) {
 
 	if c.IsProduction() && !c.CookieSecure {
 		return c, fmt.Errorf("COOKIE_SECURE must be true in production")
+	}
+
+	// The seeded super administrator is a development convenience. Shipping
+	// its default credentials to production would hand over the whole platform.
+	if c.IsProduction() && c.SeedSuperAdminPassword != "" {
+		if len(c.SeedSuperAdminPassword) < 16 {
+			return c, fmt.Errorf("SEED_SUPERADMIN_PASSWORD is too weak for production; " +
+				"use at least 16 characters or leave it unset")
+		}
 	}
 
 	if c.AIServiceToken == "" {

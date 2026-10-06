@@ -59,6 +59,9 @@ func run() error {
 		OrgName:       cfg.SeedOrgName,
 		AdminEmail:    cfg.SeedAdminEmail,
 		AdminPassword: cfg.SeedAdminPassword,
+
+		SuperAdminEmail:    cfg.SeedSuperAdminEmail,
+		SuperAdminPassword: cfg.SeedSuperAdminPassword,
 	}, log)
 	if err != nil {
 		return err

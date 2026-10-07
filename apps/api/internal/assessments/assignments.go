@@ -19,19 +19,21 @@ import (
 )
 
 type Assignment struct {
-	ID             uuid.UUID         `json:"id"`
-	AssessmentID   uuid.UUID         `json:"assessment_id"`
-	AssessmentName string            `json:"assessment_title,omitempty"`
-	TeamID         uuid.UUID         `json:"team_id"`
-	TeamName       string            `json:"team_name,omitempty"`
-	Side           string            `json:"side"`
-	Status         string            `json:"status"`
-	CurrentStageID *string           `json:"current_stage_id"`
-	Stages         []AssignmentStage `json:"stages,omitempty"`
-	AssignedAt     time.Time         `json:"assigned_at"`
+	ID               uuid.UUID         `json:"id"`
+	AssessmentID     uuid.UUID         `json:"assessment_id"`
+	AssessmentName   string            `json:"assessment_title,omitempty"`
+	TeamID           uuid.UUID         `json:"team_id"`
+	TeamName         string            `json:"team_name,omitempty"`
+	Side             string            `json:"side"`
+	Status           string            `json:"status"`
+	CurrentStageID   *string           `json:"current_stage_id"`
+	CurrentStageKind *string           `json:"current_stage_kind"`
+	Stages           []AssignmentStage `json:"stages,omitempty"`
+	AssignedAt       time.Time         `json:"assigned_at"`
 }
 
 type AssignmentStage struct {
+	SessionID   *uuid.UUID `json:"session_id,omitempty"`
 	ID          uuid.UUID  `json:"id"`
 	StageID     string     `json:"stage_id"`
 	StageKind   string     `json:"stage_kind"`
@@ -250,22 +252,25 @@ func (s *Store) Progress(ctx context.Context, orgID, stageRowID uuid.UUID) error
 	}
 
 	var pending []struct {
-		id   uuid.UUID
-		kind string
+		id     uuid.UUID
+		kind   string
+		status string
 	}
 	rows, err := tx.Query(ctx, `
-		SELECT id, stage_kind FROM assignment_stages
-		WHERE assignment_id = $1 AND sort_order > $2 AND status = 'pending'
-		ORDER BY sort_order`, assignmentID, sortOrder)
+		SELECT id, stage_kind, status FROM assignment_stages
+		WHERE assignment_id = $1 AND organization_id = $2
+		AND status NOT IN ('completed','expired','skipped','failed')
+		ORDER BY sort_order`, assignmentID, orgID)
 	if err != nil {
 		return fmt.Errorf("load following stages: %w", err)
 	}
 	for rows.Next() {
 		var e struct {
-			id   uuid.UUID
-			kind string
+			id     uuid.UUID
+			kind   string
+			status string
 		}
-		if err := rows.Scan(&e.id, &e.kind); err != nil {
+		if err := rows.Scan(&e.id, &e.kind, &e.status); err != nil {
 			rows.Close()
 			return fmt.Errorf("scan following stage: %w", err)
 		}
@@ -277,7 +282,7 @@ func (s *Store) Progress(ctx context.Context, orgID, stageRowID uuid.UUID) error
 	}
 
 	var activate *uuid.UUID
-	if len(pending) > 0 && !timeDriven(spec.Kind(pending[0].kind)) {
+	if len(pending) > 0 && pending[0].status == workflow.StagePending && !timeDriven(spec.Kind(pending[0].kind)) {
 		activate = &pending[0].id
 	}
 
@@ -363,7 +368,7 @@ func (s *Store) ListAssignments(ctx context.Context, orgID uuid.UUID,
 
 	rows, err := s.pool.Query(ctx, `
 		SELECT a.id, a.assessment_id, ass.title, a.team_id, t.name, a.side,
-		       a.status, a.current_stage_id, a.assigned_at
+		       a.status, a.current_stage_id, (SELECT st.stage_kind FROM assignment_stages st WHERE st.assignment_id=a.id AND st.organization_id=a.organization_id AND st.stage_id=a.current_stage_id), a.assigned_at
 		FROM assignments a
 		JOIN assessments ass ON ass.id = a.assessment_id
 		JOIN teams t ON t.id = a.team_id
@@ -382,7 +387,7 @@ func (s *Store) ListAssignments(ctx context.Context, orgID uuid.UUID,
 	for rows.Next() {
 		var a Assignment
 		if err := rows.Scan(&a.ID, &a.AssessmentID, &a.AssessmentName, &a.TeamID,
-			&a.TeamName, &a.Side, &a.Status, &a.CurrentStageID, &a.AssignedAt); err != nil {
+			&a.TeamName, &a.Side, &a.Status, &a.CurrentStageID, &a.CurrentStageKind, &a.AssignedAt); err != nil {
 			return nil, fmt.Errorf("scan assignment: %w", err)
 		}
 		out = append(out, a)
@@ -398,7 +403,7 @@ func (s *Store) GetAssignment(ctx context.Context, orgID, id uuid.UUID,
 	var a Assignment
 	err := s.pool.QueryRow(ctx, `
 		SELECT a.id, a.assessment_id, ass.title, a.team_id, t.name, a.side,
-		       a.status, a.current_stage_id, a.assigned_at
+		       a.status, a.current_stage_id, (SELECT st.stage_kind FROM assignment_stages st WHERE st.assignment_id=a.id AND st.organization_id=a.organization_id AND st.stage_id=a.current_stage_id), a.assigned_at
 		FROM assignments a
 		JOIN assessments ass ON ass.id = a.assessment_id
 		JOIN teams t ON t.id = a.team_id
@@ -408,7 +413,7 @@ func (s *Store) GetAssignment(ctx context.Context, orgID, id uuid.UUID,
 		        WHERE m.team_id = a.team_id AND m.user_id = $3))`,
 		id, orgID, forUser).
 		Scan(&a.ID, &a.AssessmentID, &a.AssessmentName, &a.TeamID, &a.TeamName,
-			&a.Side, &a.Status, &a.CurrentStageID, &a.AssignedAt)
+			&a.Side, &a.Status, &a.CurrentStageID, &a.CurrentStageKind, &a.AssignedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Assignment{}, httpx.ErrNotFound()
 	}
@@ -418,9 +423,10 @@ func (s *Store) GetAssignment(ctx context.Context, orgID, id uuid.UUID,
 
 	rows, err := s.pool.Query(ctx, `
 		SELECT id, stage_id, stage_kind, status, sort_order, opens_at, due_at,
-		       grace_until, started_at, completed_at
-		FROM assignment_stages
-		WHERE assignment_id = $1 ORDER BY sort_order`, id)
+		       grace_until, started_at, completed_at,
+		       (SELECT se.id FROM sessions se WHERE se.assignment_id=st.assignment_id AND se.organization_id=st.organization_id AND se.stage_id=st.stage_id)
+		FROM assignment_stages st
+		WHERE assignment_id = $1 AND organization_id=$2 ORDER BY sort_order`, id, orgID)
 	if err != nil {
 		return Assignment{}, fmt.Errorf("load assignment stages: %w", err)
 	}
@@ -430,7 +436,7 @@ func (s *Store) GetAssignment(ctx context.Context, orgID, id uuid.UUID,
 	for rows.Next() {
 		var st AssignmentStage
 		if err := rows.Scan(&st.ID, &st.StageID, &st.StageKind, &st.Status, &st.SortOrder,
-			&st.OpensAt, &st.DueAt, &st.GraceUntil, &st.StartedAt, &st.CompletedAt); err != nil {
+			&st.OpensAt, &st.DueAt, &st.GraceUntil, &st.StartedAt, &st.CompletedAt, &st.SessionID); err != nil {
 			return Assignment{}, fmt.Errorf("scan assignment stage: %w", err)
 		}
 		a.Stages = append(a.Stages, st)

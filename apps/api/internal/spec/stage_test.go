@@ -255,3 +255,69 @@ func TestDecodeConfigRoundTrip(t *testing.T) {
 		t.Fatalf("round trip lost data: %+v", cfg)
 	}
 }
+
+/* --------------------------------------------------------------- extensions */
+
+func liveTurnWith(cfg LiveTurnConfig) []Stage {
+	stages := validMootStages()
+	for i := range stages {
+		if stages[i].Kind == KindLiveTurn {
+			stages[i] = stage(stages[i].ID, KindLiveTurn, cfg)
+		}
+	}
+	return stages
+}
+
+var mootKeys = []string{"legal_reasoning", "authorities", "advocacy"}
+
+func TestExtensionsAreOptional(t *testing.T) {
+	err := ValidateStages(liveTurnWith(LiveTurnConfig{
+		DurationS: 720, Interruptions: InterruptionsEnabled,
+	}), mootKeys)
+	if err != nil {
+		t.Fatalf("a live turn without extensions must be valid: %v", err)
+	}
+}
+
+// Half a policy is a bug either way round: a grant length with no cap is an
+// unbounded clock, and a cap with no length grants nothing.
+func TestExtensionLengthAndCapMustBeSetTogether(t *testing.T) {
+	for _, cfg := range []LiveTurnConfig{
+		{DurationS: 720, Interruptions: InterruptionsEnabled, ExtensionS: 120},
+		{DurationS: 720, Interruptions: InterruptionsEnabled, MaxExtensions: 2},
+	} {
+		err := ValidateStages(liveTurnWith(cfg), mootKeys)
+		if err == nil {
+			t.Fatalf("%+v was accepted", cfg)
+		}
+		if !strings.Contains(err.Error(), "must be set together") {
+			t.Fatalf("unexpected problem: %v", err)
+		}
+	}
+}
+
+func TestExtensionsCannotPushAStagePastTheCeiling(t *testing.T) {
+	err := ValidateStages(liveTurnWith(LiveTurnConfig{
+		DurationS: maxStageDurationS, Interruptions: InterruptionsEnabled,
+		ExtensionS: 600, MaxExtensions: 3,
+	}), mootKeys)
+	if err == nil {
+		t.Fatal("extensions were allowed to exceed the stage ceiling")
+	}
+	if !strings.Contains(err.Error(), "ceiling") {
+		t.Fatalf("unexpected problem: %v", err)
+	}
+}
+
+func TestExtensionsAccessor(t *testing.T) {
+	if _, _, ok := (LiveTurnConfig{}).Extensions(); ok {
+		t.Fatal("an unset policy must not allow extensions")
+	}
+	if _, _, ok := (LiveTurnConfig{ExtensionS: 120}).Extensions(); ok {
+		t.Fatal("a grant length with no cap must not allow extensions")
+	}
+	per, max, ok := LiveTurnConfig{ExtensionS: 120, MaxExtensions: 2}.Extensions()
+	if !ok || per != 120 || max != 2 {
+		t.Fatalf("Extensions() = %d, %d, %v", per, max, ok)
+	}
+}

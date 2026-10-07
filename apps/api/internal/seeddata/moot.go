@@ -22,8 +22,12 @@ import (
 )
 
 const (
-	RubricKey        = "moot_standard_v1"
-	TemplateKey      = "moot_court_standard"
+	RubricKey   = "moot_standard_v1"
+	TemplateKey = "moot_court_standard"
+	// DemoTemplateKey is the same assessment on a timescale somebody can sit
+	// through: the memorial is due in a day rather than a fortnight, and the
+	// oral round opens as soon as it is graded.
+	DemoTemplateKey  = "moot_court_demo"
 	JudgeProfileKey  = "presiding_judge"
 	day              = 24 * time.Hour
 	defaultSpeakerS  = 12 * 60 // 12 minutes per speaker, customisable per assessment
@@ -39,17 +43,9 @@ func Seed(ctx context.Context, pool *pgxpool.Pool, orgID uuid.UUID, log *slog.Lo
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
 
-	var exists bool
-	if err := tx.QueryRow(ctx, `
-		SELECT EXISTS (SELECT 1 FROM assessment_templates
-		               WHERE organization_id = $1 AND key = $2)`,
-		orgID, TemplateKey).Scan(&exists); err != nil {
-		return fmt.Errorf("check seed template: %w", err)
-	}
-	if exists {
-		return nil
-	}
-
+	// Each step guards itself rather than one early return guarding all of
+	// them. A template added after an organisation was first seeded must
+	// still arrive, and re-running must not install the authorities twice.
 	rubricID, criterionKeys, err := seedRubric(ctx, tx, orgID)
 	if err != nil {
 		return err
@@ -57,20 +53,33 @@ func Seed(ctx context.Context, pool *pgxpool.Pool, orgID uuid.UUID, log *slog.Lo
 	if err := seedJudgeProfile(ctx, tx, orgID); err != nil {
 		return err
 	}
-	templateID, versionID, err := seedTemplate(ctx, tx, orgID, rubricID, criterionKeys)
-	if err != nil {
-		return err
+
+	var hasSources bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (SELECT 1 FROM knowledge_sources WHERE organization_id = $1)`,
+		orgID).Scan(&hasSources); err != nil {
+		return fmt.Errorf("check seed knowledge sources: %w", err)
 	}
-	if err := seedKnowledgeSources(ctx, tx, orgID); err != nil {
-		return err
+	if !hasSources {
+		if err := seedKnowledgeSources(ctx, tx, orgID); err != nil {
+			return err
+		}
+	}
+
+	for _, def := range templateDefs() {
+		installed, templateID, versionID, err := seedTemplate(ctx, tx, orgID, rubricID, criterionKeys, def)
+		if err != nil {
+			return err
+		}
+		if installed {
+			log.Info("seed: moot court template installed", "key", def.Key,
+				"template_id", templateID, "version_id", versionID, "rubric_id", rubricID)
+		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit seed: %w", err)
 	}
-
-	log.Info("seed: moot court template installed",
-		"template_id", templateID, "version_id", versionID, "rubric_id", rubricID)
 	return nil
 }
 
@@ -272,7 +281,11 @@ func mootStages() []spec.Stage {
 				DurationS: defaultSpeakerS, SpeakerOrder: 1,
 				Interruptions: spec.InterruptionsEnabled,
 				WarnAtS:       []int{120, 60},
-				AIProfiles:    []string{JudgeProfileKey},
+				// Counsel asks the bench for a moment to conclude. Two
+				// minutes, twice, and the cap is enforced in code rather
+				// than left to the judge's discretion.
+				ExtensionS: 120, MaxExtensions: 2,
+				AIProfiles: []string{JudgeProfileKey},
 			}),
 		},
 		{
@@ -282,7 +295,8 @@ func mootStages() []spec.Stage {
 				DurationS: defaultSpeakerS, SpeakerOrder: 2,
 				Interruptions: spec.InterruptionsEnabled,
 				WarnAtS:       []int{120, 60},
-				AIProfiles:    []string{JudgeProfileKey},
+				ExtensionS:    120, MaxExtensions: 2,
+				AIProfiles: []string{JudgeProfileKey},
 			}),
 		},
 		{
@@ -293,6 +307,106 @@ func mootStages() []spec.Stage {
 				Interruptions: spec.InterruptionsLimited,
 				WarnAtS:       []int{30},
 				AIProfiles:    []string{JudgeProfileKey},
+			}),
+		},
+		{
+			ID: "oral_eval", Kind: spec.KindAutomatedEvaluation, Label: "Oral Round Evaluation",
+			Config: cfg(spec.AutomatedEvaluationConfig{
+				RubricScope: []string{"advocacy", "judge_responses", "time_management"},
+				Sources:     []string{"oral_speaker_1", "oral_speaker_2", "rebuttal"},
+			}),
+		},
+		{
+			ID: "moderation", Kind: spec.KindHumanReview, Label: "Teacher Review",
+			Config: cfg(spec.HumanReviewConfig{Required: true, OverridesAllowed: true}),
+		},
+	}
+}
+
+// demoStages is the same seven stages on a clock a person can sit through.
+//
+// Only the offsets and the extension policy differ from mootStages. Keeping
+// the stage list itself identical is the point: if a demo needed a different
+// shape, the shape would be wrong.
+func demoStages() []spec.Stage {
+	cfg := func(v any) json.RawMessage {
+		raw, err := json.Marshal(v)
+		if err != nil {
+			panic("seeddata: demo stage config does not marshal: " + err.Error())
+		}
+		return raw
+	}
+
+	const (
+		prepS     = 1 * 60 * 60      // an hour to read the problem
+		memorialS = 24 * 60 * 60     // the 24 hour memorial window
+		oralStart = memorialS + 1800 // half an hour after the memorial closes
+		gapS      = 300              // between speakers
+	)
+
+	return []spec.Stage{
+		{
+			ID: "preparation", Kind: spec.KindWait, Label: "Preparation",
+			OpensAfterS: 0, DueAfterS: prepS,
+			Config: cfg(spec.WaitConfig{
+				VisibleResources: []string{"problem", "authority", "statute"},
+				Instructions: "Read the problem and the listed authorities. " +
+					"Memorial submission opens at the end of this period.",
+			}),
+		},
+		{
+			ID: "memorial", Kind: spec.KindArtifactSubmission, Label: "Written Memorial",
+			OpensAfterS: prepS,
+			DueAfterS:   memorialS,
+			GraceS:      900,
+			Config: cfg(spec.ArtifactSubmissionConfig{
+				Formats: []string{"pdf", "docx"}, MaxBytes: 25 << 20,
+				LockOnSubmit: true, FormatRules: "moot_memorial_v1",
+				Instructions: "Submit one memorial for your side within 24 hours. " +
+					"Late submissions are accepted during the grace period and marked late.",
+			}),
+		},
+		{
+			ID: "memorial_eval", Kind: spec.KindAutomatedEvaluation,
+			Label: "Memorial Evaluation",
+			Config: cfg(spec.AutomatedEvaluationConfig{
+				RubricScope: []string{"legal_reasoning", "authorities", "facts", "structure"},
+				Sources:     []string{"memorial"},
+			}),
+		},
+		{
+			ID: "oral_speaker_1", Kind: spec.KindLiveTurn, Label: "Oral Argument, Speaker 1",
+			OpensAfterS: oralStart,
+			Config: cfg(spec.LiveTurnConfig{
+				DurationS: defaultSpeakerS, SpeakerOrder: 1,
+				Interruptions: spec.InterruptionsEnabled,
+				WarnAtS:       []int{120, 60},
+				// Two minutes, twice. Counsel asks the bench for time to
+				// conclude; the bench grants it until the cap is reached.
+				ExtensionS: 120, MaxExtensions: 2,
+				AIProfiles: []string{JudgeProfileKey},
+			}),
+		},
+		{
+			ID: "oral_speaker_2", Kind: spec.KindLiveTurn, Label: "Oral Argument, Speaker 2",
+			OpensAfterS: oralStart + defaultSpeakerS + gapS,
+			Config: cfg(spec.LiveTurnConfig{
+				DurationS: defaultSpeakerS, SpeakerOrder: 2,
+				Interruptions: spec.InterruptionsEnabled,
+				WarnAtS:       []int{120, 60},
+				ExtensionS:    120, MaxExtensions: 2,
+				AIProfiles: []string{JudgeProfileKey},
+			}),
+		},
+		{
+			ID: "rebuttal", Kind: spec.KindLiveTurn, Label: "Rebuttal",
+			OpensAfterS: oralStart + 2*(defaultSpeakerS+gapS),
+			Config: cfg(spec.LiveTurnConfig{
+				DurationS: defaultRebuttalS, SpeakerOrder: 1,
+				Interruptions: spec.InterruptionsLimited,
+				WarnAtS:       []int{30},
+				// No extensions in rebuttal. Three minutes is the point of it.
+				AIProfiles: []string{JudgeProfileKey},
 			}),
 		},
 		{
@@ -324,39 +438,77 @@ func mootParticipation() spec.Participation {
 	}
 }
 
-func seedTemplate(ctx context.Context, tx pgx.Tx, orgID, rubricID uuid.UUID,
-	criterionKeys []string) (templateID, versionID uuid.UUID, err error) {
+// templateDef is one shipped template. Two of them exist for one reason: a
+// fortnight-long memorial window is what a cohort actually gets, and nobody
+// can demonstrate the product by waiting a fortnight.
+type templateDef struct {
+	Key, Name, Description string
+	Stages                 []spec.Stage
+	Defaults               []byte
+}
 
-	stages := mootStages()
+func templateDefs() []templateDef {
+	return []templateDef{
+		{
+			Key:         TemplateKey,
+			Name:        "Standard Moot Court",
+			Description: "Two speakers per side, written memorial, oral round with one AI judge",
+			Stages:      mootStages(),
+			Defaults:    []byte(`{"speaker_duration_s":720,"rebuttal_duration_s":180}`),
+		},
+		{
+			Key:  DemoTemplateKey,
+			Name: "Moot Court, One Day",
+			Description: "The same assessment on a demonstrable clock: " +
+				"memorial due in 24 hours, oral round the same day",
+			Stages:   demoStages(),
+			Defaults: []byte(`{"speaker_duration_s":720,"rebuttal_duration_s":180}`),
+		},
+	}
+}
+
+func seedTemplate(ctx context.Context, tx pgx.Tx, orgID, rubricID uuid.UUID,
+	criterionKeys []string, def templateDef) (installed bool, templateID, versionID uuid.UUID, err error) {
+
+	var exists bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (SELECT 1 FROM assessment_templates
+		               WHERE organization_id = $1 AND key = $2)`,
+		orgID, def.Key).Scan(&exists); err != nil {
+		return false, uuid.Nil, uuid.Nil, fmt.Errorf("check seed template %q: %w", def.Key, err)
+	}
+	if exists {
+		return false, uuid.Nil, uuid.Nil, nil
+	}
+
 	participation := mootParticipation()
 
 	// Validate the seed through the same path a teacher's template takes. If
 	// the shipped default cannot pass validation, the validator and the
 	// product disagree and that is worth failing start-up over.
-	if err := spec.ValidateStages(stages, criterionKeys); err != nil {
-		return uuid.Nil, uuid.Nil, fmt.Errorf("seed template is invalid: %w", err)
+	if err := spec.ValidateStages(def.Stages, criterionKeys); err != nil {
+		return false, uuid.Nil, uuid.Nil, fmt.Errorf("seed template %q is invalid: %w", def.Key, err)
 	}
 	if err := participation.Validate(); err != nil {
-		return uuid.Nil, uuid.Nil, fmt.Errorf("seed participation is invalid: %w", err)
+		return false, uuid.Nil, uuid.Nil, fmt.Errorf("seed participation is invalid: %w", err)
 	}
 
 	if err := tx.QueryRow(ctx, `
 		INSERT INTO assessment_templates
 			(organization_id, assessment_type_key, key, name, description)
 		VALUES ($1, 'moot_court', $2, $3, $4) RETURNING id`,
-		orgID, TemplateKey, "Standard Moot Court",
-		"Two speakers per side, written memorial, oral round with one AI judge").
+		orgID, def.Key, def.Name, def.Description).
 		Scan(&templateID); err != nil {
-		return uuid.Nil, uuid.Nil, fmt.Errorf("seed template: %w", err)
+		return false, uuid.Nil, uuid.Nil, fmt.Errorf("seed template %q: %w", def.Key, err)
 	}
 
-	stagesRaw, err := json.Marshal(stages)
+	stagesRaw, err := json.Marshal(def.Stages)
 	if err != nil {
-		return uuid.Nil, uuid.Nil, fmt.Errorf("encode seed stages: %w", err)
+		return false, uuid.Nil, uuid.Nil, fmt.Errorf("encode seed stages: %w", err)
 	}
 	participationRaw, err := json.Marshal(participation)
 	if err != nil {
-		return uuid.Nil, uuid.Nil, fmt.Errorf("encode seed participation: %w", err)
+		return false, uuid.Nil, uuid.Nil, fmt.Errorf("encode seed participation: %w", err)
 	}
 
 	if err := tx.QueryRow(ctx, `
@@ -364,11 +516,10 @@ func seedTemplate(ctx context.Context, tx pgx.Tx, orgID, rubricID uuid.UUID,
 			(template_id, version, rubric_id, stages, participation, defaults,
 			 status, published_at)
 		VALUES ($1, 1, $2, $3, $4, $5, 'published', now()) RETURNING id`,
-		templateID, rubricID, stagesRaw, participationRaw,
-		[]byte(`{"speaker_duration_s":720,"rebuttal_duration_s":180}`)).
+		templateID, rubricID, stagesRaw, participationRaw, def.Defaults).
 		Scan(&versionID); err != nil {
-		return uuid.Nil, uuid.Nil, fmt.Errorf("seed template version: %w", err)
+		return false, uuid.Nil, uuid.Nil, fmt.Errorf("seed template version %q: %w", def.Key, err)
 	}
 
-	return templateID, versionID, nil
+	return true, templateID, versionID, nil
 }

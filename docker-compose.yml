@@ -90,6 +90,7 @@ services:
     restart: unless-stopped
     environment:
       VITE_API_PROXY: http://api:8080
+      VITE_MEDIA_PROXY: http://media:8200
     ports:
       - "5173:5173"
     volumes:
@@ -99,6 +100,23 @@ services:
     depends_on:
       api:
         condition: service_started
+
+  media:
+    build: ./apps/media
+    restart: unless-stopped
+    environment:
+      MEDIA_SERVICE_TOKEN: ${MEDIA_SERVICE_TOKEN:-local_speech_development_only_change_me}
+      CONTROL_API_URL: http://api:8080/api/v1
+      MEDIA_ORIGINS: http://localhost:5173
+      STT_MODEL: ${STT_MODEL:-small.en}
+      STT_DEVICE: cpu
+      TTS_DEVICE: cpu
+    ports:
+      - "127.0.0.1:8200:8200"
+    volumes:
+      - ./apps/media:/srv
+      - speechmodels:/models
+    networks: [edge]
 
   # Go toolchain without installing Go on the host.
   #   docker compose run --rm go build ./...
@@ -137,6 +155,7 @@ networks:
     internal: true
 
 volumes:
+  speechmodels:
   pgdata:
   webmodules:
   gomodcache:

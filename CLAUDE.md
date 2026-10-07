@@ -53,6 +53,12 @@ docker run --rm -v "//x/megamoot/apps/api":/src -w /src golang:1.23-alpine \
    `docs/design-system.md`.
 10. **The access token lives in memory only.** Never `localStorage`. The
     refresh cookie is httpOnly and the client never reads it.
+11. **A provider credential is write-only.** It is sealed with AES-GCM under
+    `CONFIG_ENCRYPTION_KEY` and no route returns it. Responses carry
+    `api_key_hint`, the last four characters, and nothing more.
+12. **Model routing is a row, not an environment variable.** `model_providers`
+    and `model_bindings` are platform scoped and edited at `/admin/models`.
+    A URL and a token in `.env` cannot be rotated without a deploy.
 
 ## Conventions
 
@@ -62,6 +68,22 @@ docker run --rm -v "//x/megamoot/apps/api":/src -w /src golang:1.23-alpine \
 - SQL is hand-written and parameterised. No ORM.
 - Migrations are append-only; editing an applied file is rejected at startup.
 - One stage kind added means a platform decision, not a config field.
+
+## Where the build is
+
+Milestones 1 to 5 are real: identity, RBAC, templates, rubrics, assessments,
+the workflow engine, submissions and the deterministic format checker. The web
+app covers them.
+
+**No model has been called yet.** `apps/ai` does document extraction and
+nothing else; `apps/media` does not exist, so there is no STT, no TTS and no
+VAD. `SessionRoom.tsx` says so at the top: it is a layout shell. The schema
+(`ai_profiles`, `ai_requests`, `assertions`, `judge_actions`, `evaluations`)
+is ahead of the code on purpose.
+
+What exists of milestone 6: the provider adapter (`internal/llm`), the request
+ledger, platform model configuration and AI actor profiles. The grading calls
+themselves are not written.
 
 ## Hardware reality
 

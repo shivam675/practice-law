@@ -101,7 +101,5 @@ authentication, and a local directory is a smaller dependency than a container.
 | `docs/live-session.md` | audio pipeline, latency budget, failure modes |
 | `docs/ai-harness.md` | model tiers, profiles, coordinator, grading contract |
 | `docs/security.md` | threat model and controls |
-| `docs/deployment.md` | dev + single-GPU production topology |
 | `docs/design-system.md` | tokens, type, colour and the decisions behind them |
-| `docs/roadmap.md` | milestones |
 | `docs/adr/` | architecture decision records |

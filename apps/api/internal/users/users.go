@@ -42,6 +42,30 @@ func NewHandlers(pool *pgxpool.Pool, auditLog *audit.Logger) *Handlers {
 	return &Handlers{pool: pool, audit: auditLog}
 }
 
+func (h *Handlers) Roles(w http.ResponseWriter, r *http.Request) {
+	p := auth.MustPrincipal(r.Context())
+	rows, err := h.pool.Query(r.Context(), `SELECT key, name FROM roles WHERE organization_id = $1 ORDER BY name`, p.OrganizationID)
+	if err != nil {
+		httpx.Fail(w, r, fmt.Errorf("list roles: %w", err))
+		return
+	}
+	defer rows.Close()
+	out := []map[string]string{}
+	for rows.Next() {
+		var key, name string
+		if err := rows.Scan(&key, &name); err != nil {
+			httpx.Fail(w, r, err)
+			return
+		}
+		out = append(out, map[string]string{"key": key, "name": name})
+	}
+	if err := rows.Err(); err != nil {
+		httpx.Fail(w, r, err)
+		return
+	}
+	httpx.JSON(w, r, http.StatusOK, map[string]any{"roles": out})
+}
+
 // List returns organisation users. Mount behind authz.Require("user.view").
 func (h *Handlers) List(w http.ResponseWriter, r *http.Request) {
 	p := auth.MustPrincipal(r.Context())
@@ -116,6 +140,10 @@ func (h *Handlers) Create(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(req.Roles) == 0 {
 		httpx.Fail(w, r, httpx.ErrBadRequest("At least one role is required."))
+		return
+	}
+	if !p.Can("user.assign_role") {
+		httpx.Fail(w, r, httpx.ErrForbidden())
 		return
 	}
 
@@ -238,7 +266,7 @@ func (h *Handlers) SetRoles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, err := tx.Exec(r.Context(), `DELETE FROM user_roles WHERE user_id = $1`, userID); err != nil {
+	if _, err := tx.Exec(r.Context(), `DELETE FROM user_roles ur USING roles ro WHERE ur.role_id=ro.id AND ur.user_id=$1 AND ro.organization_id=$2`, userID, p.OrganizationID); err != nil {
 		httpx.Fail(w, r, fmt.Errorf("clear roles: %w", err))
 		return
 	}
@@ -268,6 +296,19 @@ func (h *Handlers) SetRoles(w http.ResponseWriter, r *http.Request) {
 // assignRoles resolves role keys within the caller's organisation only, so a
 // role id from another tenant cannot be granted.
 func assignRoles(ctx context.Context, tx pgx.Tx, orgID, userID, grantedBy uuid.UUID, keys []string) error {
+	// Validate every key before granting any. A partial match must not silently
+	// drop a requested role.
+	var count int
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM roles WHERE organization_id = $1 AND key = ANY($2::text[])`, orgID, keys).Scan(&count); err != nil {
+		return fmt.Errorf("validate roles: %w", err)
+	}
+	wanted := map[string]bool{}
+	for _, key := range keys {
+		wanted[key] = true
+	}
+	if count != len(wanted) {
+		return httpx.ErrBadRequest("One or more roles do not exist in this organisation.")
+	}
 	tag, err := tx.Exec(ctx, `
 		INSERT INTO user_roles (user_id, role_id, granted_by)
 		SELECT $1, r.id, $2

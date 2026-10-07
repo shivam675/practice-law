@@ -1,264 +1,164 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import {
-  Headphones,
-  Microphone,
-  PauseCircle,
-  Scales,
-  SpeakerHigh,
-  Stop,
-} from "@phosphor-icons/react";
+import { useQuery } from "@tanstack/react-query";
+import { Scales } from "@phosphor-icons/react";
+import { api, type Assignment } from "../lib/api";
+import { useAuth } from "../lib/auth";
 import { formatDuration, humanise } from "../lib/format";
 import { Button } from "../ui/Button";
-import { Alert } from "../ui/Feedback";
+import { Alert, ErrorState } from "../ui/Feedback";
 import { Badge, Surface } from "../ui/Layout";
 
-/**
- * Oral round room.
- *
- * This is a layout shell. Nothing here is connected: audio, transcription and
- * the bench arrive with the media plane. It exists now so the composition can
- * be argued about before it is expensive to change.
- *
- * Three decisions worth arguing with:
- *
- *   1. There is no self-view. A student watching their own face is a student
- *      not arguing. A level meter confirms they are being heard, which is the
- *      only thing a self-view was doing.
- *   2. The question stays on screen until it is answered. Under pressure
- *      people forget the question ten seconds in, and this single detail
- *      matters more than the avatar.
- *   3. The clock is numerals, not a draining bar, and stays quiet until the
- *      last minute. A progress bar that empties makes people rush.
- */
+type LiveSession = { id: string; status: string; ends_at: string; transcript: { seq: number; speaker: string; text: string }[] };
+
 export function SessionRoom() {
+  const { can } = useAuth();
+  const observer = can("session.observe");
   const { assignmentId = "", stageId = "" } = useParams();
-  const [ready, setReady] = useState(false);
+  const [sessionId, setSessionId] = useState("");
+  const [consent, setConsent] = useState(false);
+  const [checked, setChecked] = useState(false);
+  const [state, setState] = useState("Not connected");
+  const [error, setError] = useState<unknown>(null);
+  const [partial, setPartial] = useState("");
+  const [question, setQuestion] = useState("");
+  const [level, setLevel] = useState(0);
+  const [now, setNow] = useState(Date.now());
+  const [busy, setBusy] = useState(false);
+  const stream = useRef<MediaStream | null>(null);
+  const context = useRef<AudioContext | null>(null);
+  const socket = useRef<WebSocket | null>(null);
+  const player = useRef<HTMLAudioElement | null>(null);
+  const playbackUrl = useRef("");
+  const finishing = useRef(false);
+  const assignment = useQuery({queryKey: ["assignment", assignmentId], queryFn: () => api.get<Assignment>(`/assignments/${assignmentId}`), refetchInterval: observer ? 5000 : false});
+  const session = useQuery({ queryKey: ["session", sessionId], queryFn: () => api.get<LiveSession>(`/sessions/${sessionId}`), enabled: !!sessionId, refetchInterval: 2000 });
 
-  return (
-    <div className="paper-grain min-h-[100dvh] bg-paper">
-      <header className="flex h-16 items-center justify-between gap-6 border-b border-rule px-4 md:px-8">
-        <div className="flex min-w-0 items-center gap-4">
-          <span className="font-serif text-lg tracking-tight">MegaMoot</span>
-          <span className="hidden text-sm text-ink-muted sm:inline">
-            {humanise(stageId)}
-          </span>
+  function stopPlayback() {
+    player.current?.pause(); player.current = null;
+    if (playbackUrl.current) URL.revokeObjectURL(playbackUrl.current);
+    playbackUrl.current = "";
+  }
+  function disconnect() {
+    const ws = socket.current; socket.current = null; ws?.close();
+    stream.current?.getTracks().forEach((track) => track.stop()); stream.current = null;
+    void context.current?.close(); context.current = null;
+    stopPlayback();
+  }
+  useEffect(() => { const timer = window.setInterval(() => setNow(Date.now()), 1000); return () => { clearInterval(timer); disconnect(); }; }, []);
+  useEffect(() => { if (session.data && session.data.status !== "running") { disconnect(); setState("Session ended"); } }, [session.data?.status]);
+  useEffect(() => {
+    const existing = assignment.data?.stages?.find((stage) => stage.stage_id === stageId)?.session_id;
+    if (existing) { setSessionId(existing); if (observer) setState("Observing saved speech"); }
+  }, [assignment.data, stageId, observer]);
+
+  async function checkMicrophone() {
+    setError(null); setBusy(true);
+    try {
+      disconnect();
+      stream.current = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } });
+      const audio = new AudioContext({ sampleRate: 16000 }); context.current = audio;
+      await audio.audioWorklet.addModule("/audio-capture.js");
+      const source = audio.createMediaStreamSource(stream.current);
+      const capture = new AudioWorkletNode(audio, "capture");
+      capture.port.onmessage = ({ data }: MessageEvent<ArrayBuffer>) => {
+        const samples = new Int16Array(data);
+        const peak = samples.reduce((max, value) => Math.max(max, Math.abs(value)), 0) / 32768;
+        setLevel(peak);
+        if (peak > 0.08 && player.current) stopPlayback();
+        if (!finishing.current && socket.current?.readyState === WebSocket.OPEN) {
+          if (socket.current.bufferedAmount > 16000 * 2 * 3) {
+            socket.current.close(); setError(new Error("The connection is too slow. Reconnect to continue."));
+          } else socket.current.send(data);
+        }
+      };
+      const mute = audio.createGain(); mute.gain.value = 0;
+      source.connect(capture); capture.connect(mute); mute.connect(audio.destination);
+      await audio.resume(); setChecked(true); setState("Microphone ready");
+    } catch (err) { disconnect(); setChecked(false); setError(err); }
+    finally { setBusy(false); }
+  }
+  async function connect() {
+    finishing.current = false;
+    setError(null); setBusy(true);
+    try {
+      if (!context.current) throw new Error("Check your microphone before joining.");
+      const joined = await api.post<{ id: string; ticket: string; speech_path: string }>(`/assignments/${assignmentId}/stages/${stageId}/session`, { consent });
+      setSessionId(joined.id); setState("Connecting");
+      const ws = new WebSocket(`${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}${joined.speech_path}`);
+      socket.current = ws; ws.binaryType = "blob";
+      ws.onopen = () => ws.send(JSON.stringify({ ticket: joined.ticket }));
+      ws.onclose = () => { if (socket.current === ws) { socket.current = null; setState("Disconnected"); } };
+      ws.onerror = () => setError(new Error("Cannot reach the local speech service. Reconnect when it is available."));
+      ws.onmessage = ({ data }) => {
+        if (data instanceof Blob) {
+          stopPlayback(); playbackUrl.current = URL.createObjectURL(data);
+          const sound = new Audio(playbackUrl.current); player.current = sound;
+          setState("Examiner speaking"); sound.onended = () => { stopPlayback(); setState("Listening"); };
+          void sound.play().catch(() => { setState("Listening"); setError(new Error("Audio playback was blocked. Read the question on screen.")); });
+          return;
+        }
+        const event = JSON.parse(data);
+        if (event.type === "ready") setState("Listening");
+        if (event.type === "speech_started") { stopPlayback(); setState("Listening"); }
+        if (event.type === "transcript_partial") setPartial(event.text);
+        if (event.type === "transcript_final") { setPartial(event.text); setState("Examiner considering"); }
+        if (event.type === "saved") { setPartial(""); setState("Listening"); void session.refetch(); }
+        if (event.type === "question") { setQuestion(event.text); setPartial(""); void session.refetch(); }
+        if (event.type === "error" || event.type === "warning") setError(new Error(event.message));
+      };
+    } catch (err) { setError(err); }
+    finally { setBusy(false); }
+  }
+  async function end() {
+    setBusy(true); setError(null);
+    try {
+      const ws = socket.current;
+      if (ws?.readyState === WebSocket.OPEN) {
+        finishing.current = true; setState("Saving your final words");
+        await new Promise<void>((resolve, reject) => {
+          const cleanup = () => { clearTimeout(timer); ws.removeEventListener("message", message); ws.removeEventListener("close", closed); };
+          const message = (event: MessageEvent) => {
+            if (typeof event.data === "string" && JSON.parse(event.data).type === "drained") { cleanup(); resolve(); }
+          };
+          const closed = () => { cleanup(); reject(new Error("The connection closed before saving finished. Check your saved transcript before finishing.")); };
+          const timer = window.setTimeout(() => { cleanup(); reject(new Error("Saving took too long. Check your saved transcript and try again.")); }, 120000);
+          ws.addEventListener("message", message); ws.addEventListener("close", closed);
+          ws.send(JSON.stringify({ type: "finish" }));
+        });
+      }
+      await api.post(`/sessions/${sessionId}/end`); disconnect(); setState("Session ended"); await session.refetch();
+    }
+    catch (err) { setError(err); } finally { setBusy(false); }
+  }
+  const ended = !!session.data && session.data.status !== "running";
+  const remaining = session.data?.ends_at ? Math.max(0, Math.ceil((Date.parse(session.data.ends_at) - now) / 1000)) : null;
+  const lastQuestion = question || session.data?.transcript.filter((turn) => turn.speaker === "Examiner").at(-1)?.text;
+  return <div className="paper-grain min-h-[100dvh]">
+    {/* The clock has to be findable without being hunted for, and it stays
+        numerals rather than a draining bar. */}
+    <header className="sticky top-0 z-20 border-b border-rule bg-paper/90 backdrop-blur-sm">
+      <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-4 px-5 py-4">
+        <div className="flex items-baseline gap-4">
+          <span className="font-serif text-xl tracking-tight">MegaMoot</span>
+          <span className="text-sm text-ink-muted">{humanise(stageId)}</span>
         </div>
-
-        <div className="flex items-center gap-4">
-          <span className="numeric text-xl tabular-nums">{formatDuration(12 * 60)}</span>
-          <Link
-            to={`/work/${assignmentId}`}
-            className="text-sm text-ink-muted underline-offset-2 hover:text-ink hover:underline"
-          >
-            Leave
-          </Link>
-        </div>
-      </header>
-
-      <main className="mx-auto max-w-[1400px] px-4 py-8 md:px-8">
-        <Alert tone="warn" title="Layout preview">
-          The bench, your microphone and the transcript are not connected yet.
-          This screen exists so the arrangement can be settled first.
-        </Alert>
-
-        {!ready ? (
-          <DeviceCheck onReady={() => setReady(true)} />
-        ) : (
-          <div className="mt-8 grid gap-8 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.15fr)]">
-            <Bench />
-            <QuestionPane />
-          </div>
-        )}
-      </main>
-    </div>
-  );
-}
-
-function DeviceCheck({ onReady }: { onReady: () => void }) {
-  const [headphones, setHeadphones] = useState(false);
-
-  return (
-    <div className="mt-8 grid gap-8 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-      <div>
-        <h1 className="text-3xl leading-tight">Before you go in</h1>
-        <p className="mt-3 max-w-prose text-ink-muted">
-          Two checks. Both take a few seconds and both prevent the kind of
-          failure that ruins a round.
-        </p>
-
-        <ol className="mt-8 space-y-6">
-          <li>
-            <div className="flex items-start gap-4">
-              <Headphones size={22} className="mt-1 shrink-0 text-accent" aria-hidden />
-              <div>
-                <h2 className="text-base">Headphones are required</h2>
-                <p className="mt-1 max-w-prose text-sm text-ink-muted">
-                  Without them your microphone picks up the bench, the bench
-                  transcribes itself, and it starts answering its own questions.
-                </p>
-                <label className="mt-3 inline-flex items-center gap-2 text-sm">
-                  <input
-                    type="checkbox"
-                    checked={headphones}
-                    onChange={(e) => setHeadphones(e.target.checked)}
-                    className="size-4 rounded-sm border-rule-strong accent-[var(--color-accent)]"
-                  />
-                  I am wearing headphones
-                </label>
-              </div>
-            </div>
-          </li>
-
-          <li>
-            <div className="flex items-start gap-4">
-              <Microphone size={22} className="mt-1 shrink-0 text-accent" aria-hidden />
-              <div>
-                <h2 className="text-base">Microphone level</h2>
-                <p className="mt-1 max-w-prose text-sm text-ink-muted">
-                  Say your appearance out loud: "May it please the Court, counsel
-                  for the applicant."
-                </p>
-                <div className="mt-3">
-                  <LevelMeter />
-                </div>
-              </div>
-            </div>
-          </li>
-        </ol>
-
-        <Button className="mt-8" disabled={!headphones} onClick={onReady}>
-          Enter the courtroom
-        </Button>
-      </div>
-
-      <Surface className="px-6 py-6">
-        <h2 className="text-base">What the bench will do</h2>
-        <ul className="mt-4 space-y-3 text-sm text-ink-muted">
-          <li>Interrupt when a proposition is asserted without authority.</li>
-          <li>Press you when an answer avoids the question that was asked.</li>
-          <li>Hold you to the record and to what you have already conceded.</li>
-          <li>Stop speaking the moment you start. Talk over it if you need to.</li>
-        </ul>
-
-        <h2 className="mt-8 text-base">What it will not do</h2>
-        <ul className="mt-4 space-y-3 text-sm text-ink-muted">
-          <li>Tell you how you are doing, or give you its view of the merits.</li>
-          <li>Decide your mark. A teacher signs off every result.</li>
-        </ul>
-      </Surface>
-    </div>
-  );
-}
-
-/** Static bars, placed so the live meter has a shape to land in. */
-function LevelMeter() {
-  const bars = [3, 7, 12, 18, 26, 34, 28, 19, 13, 8, 5, 9, 16, 23, 17, 10, 6, 4];
-  return (
-    <div className="flex h-10 items-end gap-[3px]" aria-hidden>
-      {bars.map((height, i) => (
-        <span
-          key={i}
-          className="w-[5px] rounded-sm bg-accent/35"
-          style={{ height: `${height + 6}px` }}
-        />
-      ))}
-    </div>
-  );
-}
-
-function Bench() {
-  return (
-    <div>
-      <Surface className="relative overflow-hidden">
-        {/* The bench portrait. A single illustrated judge with a small set of
-            states reads as more serious than mediocre 3D. The renderer is
-            swapped in here without touching anything around it. */}
-        <div className="flex aspect-[4/3] items-center justify-center bg-paper-sunken">
-          <div className="text-center">
-            <span className="mx-auto flex size-20 items-center justify-center rounded-full border border-rule-strong bg-paper-raised">
-              <Scales size={34} className="text-accent" aria-hidden />
-            </span>
-            <p className="mt-4 font-serif text-lg">Presiding Judge</p>
-            <p className="mt-1 text-xs text-ink-faint">Avatar renderer not connected</p>
-          </div>
-        </div>
-
-        <div className="absolute left-4 top-4">
-          <Badge tone="accent">
-            <SpeakerHigh size={11} className="mr-1" aria-hidden />
-            Speaking
-          </Badge>
-        </div>
-      </Surface>
-
-      <div className="mt-5 flex items-center justify-between gap-4">
-        <div>
-          <p className="text-xs text-ink-faint">Your microphone</p>
-          <div className="mt-2">
-            <LevelMeter />
-          </div>
-        </div>
-
-        <div className="flex gap-2">
-          <Button variant="secondary" size="sm" disabled>
-            <PauseCircle size={16} aria-hidden />
-            Pause
-          </Button>
-          <Button variant="danger" size="sm" disabled>
-            <Stop size={16} aria-hidden />
-            End
-          </Button>
+        <div className="flex items-center gap-6">
+          {remaining !== null && <span className="numeric text-2xl text-accent" aria-label="Time remaining">{formatDuration(remaining)}</span>}
+          <Link className="text-sm text-ink-muted underline underline-offset-4 hover:text-ink" to={`/work/${assignmentId}`}>Back to assessment</Link>
         </div>
       </div>
-    </div>
-  );
+    </header>
+    <main className="mx-auto max-w-6xl px-5 py-8">
+      {error ? <ErrorState error={error} /> : null}{session.error ? <ErrorState error={session.error} /> : null}{assignment.error ? <ErrorState error={assignment.error} /> : null}
+      {ended ? <Alert tone="info" title="Your session has ended">The saved transcript is below. Results require teacher review before publication.</Alert> : null}
+      <div className="mt-6 grid gap-8 lg:grid-cols-[minmax(260px,0.8fr)_minmax(0,1.2fr)]">
+        <section><Surface className="p-6"><Scales size={48} className="text-accent" aria-hidden /><h1 className="mt-5 text-3xl">{observer ? "Session observation" : sessionId ? "Your oral round" : "Before you begin"}</h1><div className="mt-4"><Badge>{state}</Badge></div><p className="mt-5 text-sm leading-relaxed text-ink-muted">Wear headphones. Speak naturally and pause at the end of a point. The examiner’s question stays on screen.</p><div className="mt-6"><label htmlFor="mic-level" className="text-sm">Microphone level</label><meter id="mic-level" className="mt-3 h-3 w-full" min={0} max={1} value={level} /></div>
+          {!ended && !observer && <div className="mt-6 space-y-4"><Button variant="secondary" disabled={busy || !!socket.current} onClick={() => void checkMicrophone()}>{checked ? "Check microphone again" : "Check microphone"}</Button><label className="flex items-start gap-3 text-sm"><input className="mt-1" type="checkbox" checked={consent} onChange={(e) => setConsent(e.target.checked)} />I agree to speech transcription and AI assessment. My teacher can review the saved transcript.</label><Button disabled={busy || !checked || !consent || !!socket.current} onClick={() => void connect()}>{sessionId ? "Reconnect" : "Begin session"}</Button>{sessionId && <Button variant="danger" disabled={busy} onClick={() => void end()}>Finish session</Button>}</div>}
+        </Surface></section>
+        <section><div className="rounded-lg bg-accent-soft p-6"><h2 className="text-sm font-medium text-accent">{lastQuestion ? "The examiner asks" : "Your speaking floor"}</h2><p className="mt-3 text-2xl leading-relaxed">{lastQuestion || "Introduce your position when the session begins."}</p></div><h2 className="mb-4 mt-8 text-xl">Saved transcript</h2><div className="max-h-[55vh] space-y-5 overflow-y-auto" aria-live="polite">{session.data?.transcript.length ? session.data.transcript.map((turn) => <div key={turn.seq}><p className="text-xs font-medium text-accent">{turn.speaker}</p><p className="mt-1 leading-relaxed">{turn.text}</p></div>) : <p className="text-sm text-ink-muted">Your transcript appears here after you speak.</p>}</div>{partial && !ended && <p className="mt-5 border-t border-rule pt-4 text-sm text-ink-muted">{partial}</p>}</section>
+      </div>
+    </main>
+  </div>;
 }
 
-function QuestionPane() {
-  return (
-    <div className="flex flex-col gap-6">
-      {/* The question is the largest text in the room and does not move until
-          it is answered. */}
-      <Surface className="border-accent-rule bg-accent-soft px-6 py-6">
-        <p className="text-xs font-medium text-accent">The bench asks</p>
-        <p className="mt-3 font-serif text-2xl leading-snug text-ink">
-          Counsel, you say the suspension was proportionate. What authority
-          supports reading necessity that broadly?
-        </p>
-        <p className="mt-4 text-xs text-ink-muted">
-          Asked at <span className="numeric">04:12</span>
-        </p>
-      </Surface>
-
-      <div className="min-h-0 flex-1">
-        <p className="mb-3 text-xs text-ink-faint">Transcript</p>
-        <div className="space-y-4 text-sm leading-relaxed">
-          <p className="text-ink-faint">
-            May it please the Court. Counsel appears for the applicant and will
-            address the first and second issues.
-          </p>
-          <p className="text-ink-muted">
-            The suspension order was renewed four times on an identical recital,
-            which on its face cannot satisfy the necessity limb.
-          </p>
-          <p className="text-ink">
-            In Anuradha Bhasin this Court held an indefinite suspension
-            impermissible and required periodic review.
-            <span className="ml-1 inline-block h-4 w-[2px] translate-y-0.5 bg-accent" aria-hidden />
-          </p>
-        </div>
-      </div>
-
-      {/* Materials are drawers, closed by default. An open sidebar invites
-          reading instead of arguing. */}
-      <div className="flex flex-wrap gap-2 border-t border-rule pt-5">
-        {["Authorities", "Statement of facts", "My notes"].map((label) => (
-          <Button key={label} variant="secondary" size="sm" disabled>
-            {label}
-          </Button>
-        ))}
-      </div>
-    </div>
-  );
-}

@@ -93,9 +93,31 @@ type LiveTurnConfig struct {
 	Interruptions InterruptionPolicy `json:"interruptions"`
 	// Warn the speaker this many seconds before time expires.
 	WarnAtS []int `json:"warn_at_s,omitempty"`
+
+	// ExtensionS is how long a granted extension runs. Zero disables
+	// extensions entirely, which is what a rebuttal wants.
+	//
+	// A moot judge does not stop a speaker at the second; counsel asks for a
+	// moment to conclude and the bench grants it or does not. Modelling that
+	// is the difference between a timer and a courtroom.
+	ExtensionS int `json:"extension_s,omitempty"`
+	// MaxExtensions caps how many a speaker may be granted in this stage.
+	// The cap lives here, in code the student cannot talk to, rather than in
+	// a prompt that can be argued with.
+	MaxExtensions int `json:"max_extensions,omitempty"`
+
 	// AI profile keys seated for this stage. Empty means every profile the
 	// assessment configures.
 	AIProfiles []string `json:"ai_profiles,omitempty"`
+}
+
+// Extensions reports whether a speaker may ask for more time in this stage,
+// and how much in total.
+func (c LiveTurnConfig) Extensions() (perGrant, max int, allowed bool) {
+	if c.ExtensionS <= 0 || c.MaxExtensions <= 0 {
+		return 0, 0, false
+	}
+	return c.ExtensionS, c.MaxExtensions, true
 }
 
 type AutomatedEvaluationConfig struct {
@@ -256,6 +278,23 @@ func validateConfig(where string, s Stage, knownCriteria, stageIDs map[string]st
 				problems = append(problems, fmt.Sprintf(
 					"%s: warn_at_s %d must fall inside the stage duration", where, warn))
 			}
+		}
+
+		if c.ExtensionS < 0 || c.MaxExtensions < 0 {
+			problems = append(problems, fmt.Sprintf(
+				"%s: extension_s and max_extensions cannot be negative", where))
+		}
+		if (c.ExtensionS > 0) != (c.MaxExtensions > 0) {
+			problems = append(problems, fmt.Sprintf(
+				"%s: extension_s and max_extensions must be set together, or neither", where))
+		}
+		// The cap is what makes an extension a concession rather than an
+		// unbounded clock, so the total granted time stays inside the GPU
+		// slot the stage reserved.
+		if total := c.DurationS + c.ExtensionS*c.MaxExtensions; total > maxStageDurationS {
+			problems = append(problems, fmt.Sprintf(
+				"%s: duration_s plus every extension is %ds, above the %ds ceiling",
+				where, total, maxStageDurationS))
 		}
 
 	case KindAutomatedEvaluation:

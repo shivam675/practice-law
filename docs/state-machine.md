@@ -84,12 +84,12 @@ stages:
   - id: oral_speaker_1
     kind: live_turn
     config: { duration_s: 720, floor: candidate, speaker_order: 1,
-              interruptions: enabled }
+              interruptions: enabled, extension_s: 120, max_extensions: 2 }
 
   - id: oral_speaker_2
     kind: live_turn
     config: { duration_s: 720, floor: candidate, speaker_order: 2,
-              interruptions: enabled }
+              interruptions: enabled, extension_s: 120, max_extensions: 2 }
 
   - id: rebuttal
     kind: live_turn
@@ -107,6 +107,12 @@ stages:
 `duration_s` is per-speaker and customisable; 720 is the default (12 minutes).
 `moderation` is required because AI scores are advisory until a teacher signs
 off.
+
+When time expires the bench says so and stops granting the floor. Counsel may
+ask to conclude, and `extension_s` is granted up to `max_extensions` times.
+The cap is enforced by the session actor, not by the judge's prompt: a student
+who can argue for more time from the model has found a way to grade themselves.
+Omitting both fields disables extensions, which is what `rebuttal` does.
 
 ## Medical viva, same engine
 

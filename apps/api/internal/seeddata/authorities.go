@@ -26,7 +26,7 @@ type source struct {
 // Authority summaries are written here, not copied. Indian Supreme Court
 // judgments are public under section 52(1)(q) of the Copyright Act, 1957, but
 // full texts belong in the ingestion pipeline with a named source, not in a
-// seed file. See the open question in docs/roadmap.md.
+// seed file.
 func mootSources() []source {
 	return []source{
 		{

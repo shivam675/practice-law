@@ -29,6 +29,10 @@ type Config struct {
 	CookieDomain    string
 	CookieSecure    bool
 
+	// Seals provider credentials in model_providers. Separate from the JWT
+	// key so that rotating one does not invalidate the other.
+	ConfigEncryptionKey string
+
 	BlobDriver       string
 	BlobFSRoot       string
 	S3Endpoint       string
@@ -38,10 +42,11 @@ type Config struct {
 	S3SecretKey      string
 	S3ForcePathStyle bool
 
-	AIServiceURL     string
-	AIServiceToken   string
-	MediaServiceURL  string
-	MediaPublicWSURL string
+	AIServiceURL      string
+	AIServiceToken    string
+	MediaServiceURL   string
+	MediaServiceToken string
+	MediaPublicWSURL  string
 
 	MaxConcurrentLiveSessions int
 
@@ -54,14 +59,18 @@ type Config struct {
 	SeedAdminPassword string
 }
 
+// devEncryptionKey is the value shipped in .env.example. Production refuses it.
+const devEncryptionKey = "ZGV2ZWxvcG1lbnQtb25seS1rZXktZG8tbm90LXVzZSE="
+
 func (c Config) IsProduction() bool { return c.Env == "production" }
 
 // Load reads the environment and validates anything that would fail later at a
 // worse time.
 func Load() (Config, error) {
 	c := Config{
-		Env:      env("APP_ENV", "development"),
-		LogLevel: env("LOG_LEVEL", "info"),
+		Env:               env("APP_ENV", "development"),
+		MediaServiceToken: env("MEDIA_SERVICE_TOKEN", "local_speech_development_only_change_me"),
+		LogLevel:          env("LOG_LEVEL", "info"),
 
 		HTTPAddr:    env("API_HTTP_ADDR", ":8080"),
 		PublicURL:   env("API_PUBLIC_URL", "http://localhost:8080"),
@@ -72,6 +81,8 @@ func Load() (Config, error) {
 		RedisURL:    env("REDIS_URL", "redis://redis:6379/0"),
 
 		CookieDomain: env("COOKIE_DOMAIN", "localhost"),
+
+		ConfigEncryptionKey: env("CONFIG_ENCRYPTION_KEY", ""),
 
 		BlobDriver:  env("BLOB_DRIVER", "filesystem"),
 		BlobFSRoot:  env("BLOB_FS_ROOT", "/var/lib/megamoot/blobs"),
@@ -123,8 +134,21 @@ func Load() (Config, error) {
 	}
 	c.JWTSigningKey = []byte(key)
 
+	if c.ConfigEncryptionKey == "" {
+		return c, fmt.Errorf("CONFIG_ENCRYPTION_KEY is required; " +
+			"it seals model provider credentials at rest. Generate: openssl rand -base64 32")
+	}
+	// The placeholder is a real 32-byte key, because an unusable placeholder
+	// would only fail at the first write. It is refused by name instead.
+	if c.IsProduction() && c.ConfigEncryptionKey == devEncryptionKey {
+		return c, fmt.Errorf("CONFIG_ENCRYPTION_KEY still holds the development placeholder")
+	}
+
 	if c.IsProduction() && !c.CookieSecure {
 		return c, fmt.Errorf("COOKIE_SECURE must be true in production")
+	}
+	if len(c.MediaServiceToken) < 32 || (c.IsProduction() && strings.Contains(c.MediaServiceToken, "change_me")) {
+		return c, fmt.Errorf("MEDIA_SERVICE_TOKEN must contain at least 32 characters and must not use the development value in production")
 	}
 
 	// Shared demo credentials are a development convenience. In production

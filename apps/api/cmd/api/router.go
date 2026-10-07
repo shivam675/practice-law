@@ -6,11 +6,15 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/cors"
 
+	"github.com/intelimek/megamoot/apps/api/internal/aiprofiles"
 	"github.com/intelimek/megamoot/apps/api/internal/assessments"
 	"github.com/intelimek/megamoot/apps/api/internal/auth"
 	"github.com/intelimek/megamoot/apps/api/internal/authz"
 	"github.com/intelimek/megamoot/apps/api/internal/httpx"
+	"github.com/intelimek/megamoot/apps/api/internal/platformcfg"
+	"github.com/intelimek/megamoot/apps/api/internal/reports"
 	"github.com/intelimek/megamoot/apps/api/internal/rubrics"
+	"github.com/intelimek/megamoot/apps/api/internal/sessions"
 	"github.com/intelimek/megamoot/apps/api/internal/submissions"
 	"github.com/intelimek/megamoot/apps/api/internal/teams"
 	"github.com/intelimek/megamoot/apps/api/internal/templates"
@@ -45,6 +49,10 @@ func newRouter(a *app) http.Handler {
 	teamHandlers := teams.NewHandlers(a.teams, a.audit)
 	assessmentHandlers := assessments.NewHandlers(a.assessments, a.audit)
 	submissionHandlers := submissions.NewHandlers(a.submissions, a.audit)
+	platformHandlers := platformcfg.NewHandlers(a.platform, a.ledger, a.audit)
+	profileHandlers := aiprofiles.NewHandlers(a.aiProfiles, a.audit)
+	reportHandlers := reports.New(a.pool, a.engine)
+	sessionHandlers := sessions.New(a.pool, a.engine, a.harness, a.cfg.MediaServiceToken, a.cfg.MaxConcurrentLiveSessions)
 
 	// Credential endpoints get their own bucket. Everything else shares a
 	// looser one; per-tenant quotas arrive with usage accounting.
@@ -53,6 +61,9 @@ func newRouter(a *app) http.Handler {
 
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Use(apiLimiter.LimitByIP)
+		r.Get("/media/session", sessionHandlers.Verify)
+		r.Post("/media/turn", sessionHandlers.Turn)
+		r.Post("/media/question", sessionHandlers.Question)
 
 		r.Route("/auth", func(r chi.Router) {
 			r.With(loginLimiter.LimitByIP).Group(authHandlers.Routes)
@@ -62,8 +73,11 @@ func newRouter(a *app) http.Handler {
 			r.Use(a.auth.Authenticate)
 
 			r.Get("/me", authHandlers.Me)
+			r.With(authz.RequireAny("session.join", "session.observe")).Get("/sessions/{sessionID}", sessionHandlers.Get)
+			r.With(authz.RequireAny("session.join", "session.moderate")).Post("/sessions/{sessionID}/end", sessionHandlers.End)
 
 			r.Route("/users", func(r chi.Router) {
+				r.With(authz.RequireAny("user.create", "user.assign_role")).Get("/roles", userHandlers.Roles)
 				r.With(authz.Require("user.view")).Get("/", userHandlers.List)
 				r.With(authz.Require("user.create")).Post("/", userHandlers.Create)
 				r.With(authz.Require("user.assign_role")).
@@ -110,6 +124,10 @@ func newRouter(a *app) http.Handler {
 			// query to their own team when they lack the organisation-wide
 			// permission, so view_own cannot be used to read someone else's.
 			r.Route("/assignments", func(r chi.Router) {
+				r.With(authz.RequireAny("report.view", "report.view_own")).Get("/{assignmentID}/report", reportHandlers.Get)
+				r.With(authz.Require("assessment.override_grade")).Patch("/{assignmentID}/report/scores", reportHandlers.Override)
+				r.With(authz.Require("report.publish")).Post("/{assignmentID}/report/publish", reportHandlers.Publish)
+				r.With(authz.Require("session.join")).Post("/{assignmentID}/stages/{stageID}/session", sessionHandlers.Join)
 				r.With(authz.RequireAny("assessment.view", "assessment.view_own")).
 					Get("/", assessmentHandlers.ListAssignments)
 				r.With(authz.RequireAny("assessment.view", "assessment.view_own")).
@@ -123,6 +141,38 @@ func newRouter(a *app) http.Handler {
 					Get("/{assignmentID}/submissions", submissionHandlers.List)
 				r.With(authz.RequireAny("knowledge.view", "assessment.view_own")).
 					Get("/{assignmentID}/resources", assessmentHandlers.Resources)
+			})
+
+			// AI actors. Organisation scoped: how firm a judge is belongs to
+			// the institution, which model answers does not.
+			r.Route("/ai-profiles", func(r chi.Router) {
+				r.With(authz.Require("ai_profile.view")).Get("/", profileHandlers.List)
+				r.With(authz.Require("ai_profile.create")).Post("/", profileHandlers.Create)
+				// An edit supersedes rather than mutates, so it is a POST and
+				// it answers 201 with the new version.
+				r.With(authz.Require("ai_profile.edit")).
+					Post("/{profileID}/versions", profileHandlers.Revise)
+				r.With(authz.Require("ai_profile.edit")).
+					Put("/{profileID}/active", profileHandlers.SetActive)
+			})
+
+			// Platform operator only. platform.model.configure is a platform
+			// permission; no organisation role can hold it.
+			r.Route("/platform", func(r chi.Router) {
+				r.Use(authz.Require("platform.model.configure"))
+
+				r.Get("/providers", platformHandlers.ListProviders)
+				r.Post("/providers", platformHandlers.CreateProvider)
+				r.Patch("/providers/{providerID}", platformHandlers.UpdateProvider)
+				r.Delete("/providers/{providerID}", platformHandlers.DeleteProvider)
+
+				r.Get("/bindings", platformHandlers.ListBindings)
+				r.Put("/bindings", platformHandlers.PutBindings)
+
+				// Dials the provider for real. Its own bucket, because it is
+				// the one route here that costs GPU time.
+				r.With(httpx.NewRateLimiter(30, 5).LimitByIP).
+					Post("/test", platformHandlers.Test)
 			})
 
 			r.Route("/submissions", func(r chi.Router) {

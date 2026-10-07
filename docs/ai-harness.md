@@ -16,20 +16,40 @@ VRAM: roughly 6 + 3 + 1 + 0.5 = 11 GB resident, leaving headroom. The 30B MoE
 is swapped in for offline work only, because at Q4 it spills into system RAM and
 produces around 25 tokens per second, which cannot meet the 1200 ms live budget.
 
-Migration to a hosted provider is a config change: `LLM_PROVIDER` plus the model
-names. Nothing in the application references Ollama.
+Migration to a hosted provider is a row in `model_providers` and a tier
+binding in `model_bindings`, edited by a platform operator at `/admin/models`.
+Nothing in the application references Ollama, and nothing about a provider
+lives in `.env`: an endpoint and a bearer token that cannot be rotated without
+a deploy are an outage waiting for a key expiry.
+
+The credential is sealed with AES-GCM under `CONFIG_ENCRYPTION_KEY` and no
+route returns it. A connection test dials the provider for real and is
+ledgered to `ai_requests` like any other call.
 
 ## Harness components
 
 ```
-ModelRouter       (profile, task, budget, latency_class) -> provider + model
-ProviderAdapter   ollama | openai_compatible | vllm | anthropic
-StructuredGate    Pydantic schema -> one repair retry -> reject
-RequestLedger     tokens, latency, cost, prompt_version, session_id
+ModelRouter       tier -> provider + model + params   platformcfg.Resolve  done
+ProviderAdapter   openai_compatible | anthropic         internal/llm         done
+StructuredGate    schema -> one repair retry -> reject  llm.Structured       done
+RequestLedger     tokens, latency, cost, prompt_version llm.Ledger           done
+CallHarness       untrusted blocks, routing, ledgering  internal/harness     done
+Retrieval         chunk, embed, hybrid search           internal/retrieval   done
+Grader            per-criterion scoring, verification   internal/grading     done
 ```
 
 A rejected judge decision degrades to `continue`. It never crashes a session.
 Every call is ledgered to `ai_requests`, which is also the billing source.
+
+Nothing outside `internal/harness` constructs a client. Untrusted content can
+only be passed as a `harness.Untrusted` block, so "a student's memorial never
+reaches a system prompt" is a property of the type rather than a rule somebody
+has to remember.
+
+Chunks are embedded by the tier bound to `embedding` and stored in
+`document_chunks`. Search fuses the pgvector and tsvector rankings by
+reciprocal rank: dense alone misses a statute cited by number, lexical alone
+misses a paraphrase, and legal argument is full of both.
 
 ## AI profiles
 

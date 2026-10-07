@@ -138,6 +138,8 @@ export const api = {
   get: <T>(path: string, signal?: AbortSignal) => request<T>(path, { signal }),
   post: <T>(path: string, body?: unknown) => request<T>(path, { method: "POST", body }),
   put: <T>(path: string, body?: unknown) => request<T>(path, { method: "PUT", body }),
+  patch: <T>(path: string, body?: unknown) => request<T>(path, { method: "PATCH", body }),
+  del: <T>(path: string) => request<T>(path, { method: "DELETE" }),
   upload: <T>(path: string, form: FormData) => request<T>(path, { method: "POST", form }),
 };
 
@@ -182,6 +184,7 @@ export type AssignmentStage = {
   id: string;
   stage_id: string;
   stage_kind: StageKind;
+  session_id?: string;
   label?: string;
   status: StageStatus;
   sort_order: number;
@@ -207,6 +210,7 @@ export type Assignment = {
     | "abandoned"
     | "withdrawn";
   current_stage_id: string | null;
+  current_stage_kind: string | null;
   stages?: AssignmentStage[];
   assigned_at: string;
 };
@@ -283,3 +287,66 @@ export type Team = {
   }[];
   created_at: string;
 };
+
+/* ------------------------------------------------------------------- models */
+
+export type ModelTier = "monitor" | "judge" | "grader" | "embedding";
+
+/** The API key is never returned. `api_key_hint` is the last four characters. */
+export type ModelProvider = {
+  id: string;
+  key: string;
+  name: string;
+  kind: "openai_compatible" | "anthropic";
+  base_url: string;
+  api_key_hint: string;
+  has_api_key: boolean;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ModelBinding = {
+  tier: ModelTier;
+  provider_id: string;
+  provider_key: string;
+  model: string;
+  temperature: number;
+  top_p: number;
+  max_tokens: number;
+  timeout_ms: number;
+  updated_at: string;
+};
+
+/** A failed test is a 200 with ok=false: the request worked, the provider did not. */
+export type ConnectionTest = {
+  ok: boolean;
+  reachable: boolean;
+  models: string[];
+  model: string;
+  sample: string;
+  latency_ms: number;
+  error: string;
+  unauthorized: boolean;
+};
+
+export type AiProfile = {
+  id: string;
+  key: string;
+  name: string;
+  role: "judge" | "examiner" | "interviewer" | "opponent" | "moderator" | "evaluator";
+  version: number;
+  model_tier: "monitor" | "judge" | "grader";
+  system_prompt: string;
+  temperature: number;
+  voice: string;
+  personality: Record<string, unknown>;
+  interruption_policy: Record<string, unknown>;
+  focus: string[];
+  capabilities: string[];
+  rag_sources: string[];
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+};
+

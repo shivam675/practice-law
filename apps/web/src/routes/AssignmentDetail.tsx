@@ -19,8 +19,9 @@ import { ButtonLink } from "../ui/Button";
 import { StageTimeline } from "../features/assignment/StageTimeline";
 import { SubmissionPanel } from "../features/assignment/SubmissionPanel";
 import { ResourceReader } from "../features/assignment/ResourceReader";
+import { ReportPanel } from "../features/assignment/ReportPanel";
 
-type Tab = "stage" | "materials";
+type Tab = "stage" | "materials" | "report";
 
 export function AssignmentDetail() {
   const { assignmentId = "" } = useParams();
@@ -117,9 +118,10 @@ export function AssignmentDetail() {
             <TabButton active={tab === "materials"} onClick={() => setTab("materials")}>
               Case materials
             </TabButton>
+            <TabButton active={tab === "report"} onClick={() => setTab("report")}>Results and feedback</TabButton>
           </div>
 
-          {tab === "materials" ? (
+          {tab === "report" ? <ReportPanel assignmentId={assignmentId} /> : tab === "materials" ? (
             resources.isPending ? (
               <SkeletonRows rows={2} />
             ) : resources.error ? (
@@ -218,6 +220,8 @@ function StageView({
           microphone.
         </Alert>
       ) : null}
+
+      {stage.session_id && <ButtonLink variant="secondary" to={`/session/${assignmentId}/${stage.stage_id}`}>Read session transcript</ButtonLink>}
 
       {stage.stage_kind === "automated_evaluation" ? (
         <Alert tone="info" title="Evaluation">

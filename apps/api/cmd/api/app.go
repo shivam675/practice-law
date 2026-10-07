@@ -3,18 +3,26 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/intelimek/megamoot/apps/api/internal/aiclient"
+	"github.com/intelimek/megamoot/apps/api/internal/aiprofiles"
 	"github.com/intelimek/megamoot/apps/api/internal/assessments"
 	"github.com/intelimek/megamoot/apps/api/internal/audit"
 	"github.com/intelimek/megamoot/apps/api/internal/auth"
 	"github.com/intelimek/megamoot/apps/api/internal/blob"
 	"github.com/intelimek/megamoot/apps/api/internal/config"
+	"github.com/intelimek/megamoot/apps/api/internal/grading"
+	"github.com/intelimek/megamoot/apps/api/internal/harness"
+	"github.com/intelimek/megamoot/apps/api/internal/llm"
+	"github.com/intelimek/megamoot/apps/api/internal/platformcfg"
+	"github.com/intelimek/megamoot/apps/api/internal/retrieval"
 	"github.com/intelimek/megamoot/apps/api/internal/rubrics"
+	"github.com/intelimek/megamoot/apps/api/internal/secrets"
 	"github.com/intelimek/megamoot/apps/api/internal/submissions"
 	"github.com/intelimek/megamoot/apps/api/internal/teams"
 	"github.com/intelimek/megamoot/apps/api/internal/templates"
@@ -34,6 +42,14 @@ type app struct {
 	scheduler   *workflow.Scheduler
 	blobs       blob.Store
 	ai          *aiclient.Client
+	ledger      *llm.Ledger
+	platform    *platformcfg.Store
+	harness     *harness.Harness
+	retrieval   *retrieval.Store
+	indexer     *retrieval.Indexer
+	grading     *grading.Store
+	grader      *grading.Worker
+	aiProfiles  *aiprofiles.Store
 	rubrics     *rubrics.Store
 	templates   *templates.Store
 	teams       *teams.Store
@@ -70,11 +86,27 @@ func newApp(cfg config.Config, log *slog.Logger, pool *pgxpool.Pool) (*app, erro
 
 	a.ai = aiclient.New(cfg.AIServiceURL, cfg.AIServiceToken)
 
+	// Refused at start-up rather than at the first credential write: a box
+	// that cannot seal is a settings page that silently loses API keys.
+	box, err := secrets.NewBox(cfg.ConfigEncryptionKey)
+	if err != nil {
+		return nil, fmt.Errorf("CONFIG_ENCRYPTION_KEY: %w", err)
+	}
+	a.ledger = llm.NewLedger(pool, log)
+	a.platform = platformcfg.NewStore(pool, box)
+	a.aiProfiles = aiprofiles.NewStore(pool)
+	a.harness = harness.New(a.platform, a.ledger, log)
+	a.retrieval = retrieval.NewStore(pool, a.harness, log)
+	a.indexer = retrieval.NewIndexer(a.retrieval, log)
+
 	a.rubrics = rubrics.NewStore(pool)
 	a.templates = templates.NewStore(pool, a.rubrics)
 	a.teams = teams.NewStore(pool)
 	a.assessments = assessments.NewStore(pool, a.templates, a.teams, a.engine)
 	a.submissions = submissions.NewStore(pool, a.blobs, a.ai, a.templates, a.engine)
+
+	a.grading = grading.NewStore(pool, a.harness, a.retrieval, a.rubrics, log)
+	a.grader = grading.NewWorker(a.grading, a.engine, log)
 
 	a.engine.SetHook(a.onTransition)
 	return a, nil
@@ -84,6 +116,18 @@ func newApp(cfg config.Config, log *slog.Logger, pool *pgxpool.Pool) (*app, erro
 // active starts its assignment; a stage settling advances to whatever comes
 // next. All of it is recorded state, none of it is a model's suggestion.
 func (a *app) onTransition(ctx context.Context, req workflow.Request, from string) error {
+	if req.Subject == workflow.SubjectSession && req.To == workflow.SessionEnded {
+		var stageID uuid.UUID
+		err := a.pool.QueryRow(ctx, `SELECT st.id FROM sessions s JOIN assignment_stages st ON st.assignment_id=s.assignment_id AND st.stage_id=s.stage_id AND st.organization_id=s.organization_id WHERE s.id=$1 AND s.organization_id=$2`, req.SubjectID, req.OrganizationID).Scan(&stageID)
+		if err != nil {
+			return err
+		}
+		err = a.engine.Apply(ctx, workflow.Request{Subject: workflow.SubjectStage, SubjectID: stageID, OrganizationID: req.OrganizationID, To: workflow.StageCompleted, Cause: "session_ended", Actor: workflow.SystemActor()})
+		if errors.Is(err, workflow.ErrNoop) {
+			return nil
+		}
+		return err
+	}
 	if req.Subject != workflow.SubjectStage {
 		return nil
 	}
@@ -99,11 +143,13 @@ func (a *app) onTransition(ctx context.Context, req workflow.Request, from strin
 	return nil
 }
 
-// startBackground launches the durable timer worker. It returns once the
-// context is cancelled.
+// startBackground launches the durable timer worker, the document indexer and
+// the grading worker. It returns once the context is cancelled.
 func (a *app) startBackground(ctx context.Context) {
 	if err := a.scheduler.ReleaseStale(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		a.log.Error("release stale scheduled transitions", "error", err)
 	}
 	go a.scheduler.Run(ctx)
+	go a.indexer.Run(ctx)
+	go a.grader.Run(ctx)
 }

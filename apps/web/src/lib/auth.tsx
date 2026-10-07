@@ -7,6 +7,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import {
   api,
   onSessionExpired,
@@ -31,16 +32,18 @@ type AuthState = {
 const AuthContext = createContext<AuthState | null>(null);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
+  const queryClient = useQueryClient();
   const [status, setStatus] = useState<AuthState["status"]>("loading");
   const [user, setUser] = useState<User | null>(null);
   const [permissions, setPermissions] = useState<Set<string>>(new Set());
 
   const clear = useCallback(() => {
+    queryClient.clear();
     setAccessToken(null);
     setUser(null);
     setPermissions(new Set());
     setStatus("signed-out");
-  }, []);
+  }, [queryClient]);
 
   const load = useCallback(async () => {
     const me = await api.get<Me>("/me");

@@ -2,7 +2,10 @@ import { NavLink, Outlet } from "react-router-dom";
 import {
   Books,
   Gavel,
+  House,
+  Robot,
   SignOut,
+  SlidersHorizontal,
   Stack,
   UsersThree,
 } from "@phosphor-icons/react";
@@ -14,9 +17,19 @@ type NavItem = { to: string; label: string; icon: typeof Gavel; permission?: str
 const studentNav: NavItem[] = [{ to: "/work", label: "My work", icon: Books }];
 
 const staffNav: NavItem[] = [
+  { to: "/", label: "Overview", icon: House },
   { to: "/assessments", label: "Assessments", icon: Gavel, permission: "assessment.view" },
   { to: "/teams", label: "Teams", icon: UsersThree, permission: "team.view" },
+  { to: "/admin/users", label: "People", icon: UsersThree, permission: "user.view" },
   { to: "/templates", label: "Templates", icon: Stack, permission: "template.view" },
+  { to: "/admin/actors", label: "AI actors", icon: Robot, permission: "ai_profile.view" },
+  // Platform operators only. Everyone else never sees this exists.
+  {
+    to: "/admin/models",
+    label: "Models",
+    icon: SlidersHorizontal,
+    permission: "platform.model.configure",
+  },
 ];
 
 export function AppShell() {
@@ -58,6 +71,7 @@ export function AppShell() {
               <li key={to}>
                 <NavLink
                   to={to}
+                  end={to === "/"}
                   className={({ isActive }) =>
                     `flex items-center gap-3 rounded-md px-3 py-2 text-sm transition-colors ${
                       isActive
@@ -75,13 +89,14 @@ export function AppShell() {
         </nav>
 
         {/* On narrow screens the sidebar becomes a horizontal strip rather
-            than a drawer: there are at most three destinations. */}
+            than a drawer: there are only a handful of destinations. */}
         <main className="min-w-0 flex-1 py-6 md:py-8">
           <ul className="mb-6 flex gap-2 overflow-x-auto md:hidden">
             {items.map(({ to, label }) => (
               <li key={to}>
                 <NavLink
                   to={to}
+                  end={to === "/"}
                   className={({ isActive }) =>
                     `inline-flex whitespace-nowrap rounded-md border px-3 py-1.5 text-sm ${
                       isActive

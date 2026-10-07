@@ -11,6 +11,10 @@ import { AssessmentDetail } from "./routes/AssessmentDetail";
 import { Teams } from "./routes/Teams";
 import { Templates } from "./routes/Templates";
 import { SessionRoom } from "./routes/SessionRoom";
+import { ModelSettings } from "./routes/ModelSettings";
+import { AiProfiles } from "./routes/AiProfiles";
+import { Dashboard } from "./routes/Dashboard";
+import { People } from "./routes/People";
 import { Spinner } from "./ui/Feedback";
 
 const queryClient = new QueryClient({
@@ -73,6 +77,9 @@ function Router() {
         <Route path="/assessments/:assessmentId" element={<AssessmentDetail />} />
         <Route path="/teams" element={<Teams />} />
         <Route path="/templates" element={<Templates />} />
+        <Route path="/admin/actors" element={<AiProfiles />} />
+        <Route path="/admin/models" element={<ModelSettings />} />
+        <Route path="/admin/users" element={<People />} />
         <Route path="*" element={<NotFound />} />
       </Route>
     </Routes>
@@ -81,7 +88,7 @@ function Router() {
 
 function Home() {
   const staff = useIsStaff();
-  return <Navigate to={staff ? "/assessments" : "/work"} replace />;
+  return staff ? <Dashboard /> : <Navigate to="/work" replace />;
 }
 
 function NotFound() {

@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/intelimek/megamoot/apps/api/internal/auth"
+	"github.com/intelimek/megamoot/apps/api/internal/httpx"
 )
 
 // systemRoles are seeded into every organisation. Custom roles can be added
@@ -65,6 +66,7 @@ var systemRoles = []struct {
 }
 
 type BootstrapInput struct {
+	RequireNew    bool
 	OrgName       string
 	AdminEmail    string
 	AdminPassword string
@@ -91,6 +93,10 @@ func Bootstrap(ctx context.Context, pool *pgxpool.Pool, in BootstrapInput, log *
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
 
 	slug := Slugify(in.OrgName)
+	// Serialize creation by slug so the admin API cannot seed a competing tenant.
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, "organization:"+slug); err != nil {
+		return uuid.Nil, fmt.Errorf("lock organization creation: %w", err)
+	}
 
 	var orgID uuid.UUID
 	err = tx.QueryRow(ctx, `SELECT id FROM organizations WHERE slug = $1`, slug).Scan(&orgID)
@@ -104,6 +110,8 @@ func Bootstrap(ctx context.Context, pool *pgxpool.Pool, in BootstrapInput, log *
 		log.Info("bootstrap: organization created", "slug", slug)
 	case err != nil:
 		return uuid.Nil, fmt.Errorf("look up organization: %w", err)
+	case in.RequireNew:
+		return uuid.Nil, httpx.ErrConflict("An organisation with this name or address already exists.")
 	}
 
 	roleIDs, err := seedRoles(ctx, tx, orgID)

@@ -276,6 +276,7 @@ export type Assessment = {
 };
 
 export type Team = {
+	 membership_locked?: boolean;
   id: string;
   name: string;
   members: {

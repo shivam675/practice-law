@@ -1,26 +1,20 @@
-import { useQuery } from "@tanstack/react-query";
+import { useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useAuth } from "../lib/auth";
+import { Button } from "../ui/Button";
+import { TemplateAuthor, type AuthorVersion } from "./TemplateAuthor";
 import { api } from "../lib/api";
 import { humanise, stageKindLabel, formatDuration } from "../lib/format";
-import type { StageKind } from "../lib/api";
+
 import { Badge, PageHeader, Surface } from "../ui/Layout";
 import { ErrorState, SkeletonRows } from "../ui/Feedback";
 
-type Version = {
+type Version = AuthorVersion & {
   id: string;
   version: number;
   status: string;
-  stages?: Stage[];
-  participation?: { sides: string[]; speakers: number };
 };
 
-type Stage = {
-  id: string;
-  kind: StageKind;
-  label: string;
-  due_after_s?: number;
-  opens_after_s?: number;
-  config?: { duration_s?: number; rubric_scope?: string[]; format_rules?: string };
-};
 
 type Template = {
   id: string;
@@ -32,6 +26,8 @@ type Template = {
 };
 
 export function Templates() {
+  const { can } = useAuth();
+  const [creating, setCreating] = useState(false);
   const templates = useQuery({
     queryKey: ["templates"],
     queryFn: () => api.get<{ templates: Template[] }>("/templates"),
@@ -43,26 +39,28 @@ export function Templates() {
         title="Templates"
         meta="A template is a stage list, a participation shape and a rubric. The same engine runs every assessment type."
       />
+      {can("template.create") && can("template.edit") && <Button onClick={() => setCreating(true)}>Create template</Button>}
+      {creating && <TemplateAuthor onClose={() => setCreating(false)} />}
 
       {templates.isPending ? <SkeletonRows rows={2} /> : null}
       {templates.error ? <ErrorState error={templates.error} /> : null}
 
       <ul className="space-y-6">
-        {templates.data?.templates.map((template) => (
+        {templates.data?.templates?.map((template) => (
           <TemplateCard key={template.id} template={template} />
         ))}
       </ul>
 
-      <p className="mt-10 max-w-prose text-sm text-ink-muted">
-        Editing stage configuration from this screen is not built yet. Until it
-        is, templates are created through the API and reviewed here.
-      </p>
     </>
   );
 }
 
 function TemplateCard({ template }: { template: Template }) {
+  const { can } = useAuth();
+  const client = useQueryClient();
+  const [editing, setEditing] = useState(false);
   const latest = template.versions[0];
+  const publish = useMutation({ mutationFn: () => api.post(`/templates/versions/${latest!.id}/publish`, {}), onSuccess: () => { void client.invalidateQueries({ queryKey: ["templates"] }); void client.invalidateQueries({ queryKey: ["template-version", latest!.id] }); } });
 
   const detail = useQuery({
     queryKey: ["template-version", latest?.id],
@@ -74,6 +72,10 @@ function TemplateCard({ template }: { template: Template }) {
 
   return (
     <Surface as="li" className="px-5 py-5">
+      {detail.error && <ErrorState error={detail.error} />}
+      {can("template.edit") && <div className="mb-4 flex gap-3"><Button disabled={Boolean(latest) && !detail.data} onClick={() => setEditing(true)}>{latest ? "Edit as new version" : "Add first version"}</Button>{latest?.status === "draft" && <Button disabled={publish.isPending} onClick={() => publish.mutate()}>Publish version</Button>}</div>}
+      {publish.error && <ErrorState error={publish.error} />}
+      {editing && <TemplateAuthor templateId={template.id} initial={detail.data} onClose={() => setEditing(false)} />}
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
@@ -114,19 +116,19 @@ function TemplateCard({ template }: { template: Template }) {
               <span className="block text-sm text-ink">{stage.label}</span>
               <span className="mt-0.5 block text-xs text-ink-muted">
                 {stageKindLabel[stage.kind]}
-                {stage.config?.duration_s ? (
+                {typeof stage.config?.duration_s === "number" ? (
                   <>
                     {" · "}
                     <span className="numeric">{formatDuration(stage.config.duration_s)}</span>
                   </>
                 ) : null}
-                {stage.config?.rubric_scope ? (
+                {Array.isArray(stage.config?.rubric_scope) ? (
                   <>
                     {" · "}
                     <span className="numeric">{stage.config.rubric_scope.length}</span> criteria
                   </>
                 ) : null}
-                {stage.config?.format_rules ? <> · {stage.config.format_rules}</> : null}
+                {typeof stage.config?.format_rules === "string" ? <> · {stage.config.format_rules}</> : null}
               </span>
             </li>
           ))}

@@ -12,6 +12,7 @@ package aiprofiles
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -120,6 +121,18 @@ func (in Input) validate() error {
 	}
 	if in.Temperature < 0 || in.Temperature > 2 {
 		problems = append(problems, "temperature must be between 0 and 2")
+	}
+	var policy struct {
+		Cooldown *int     `json:"cooldown_s"`
+		Maximum  *int     `json:"max_per_stage"`
+		Priority *float64 `json:"min_priority"`
+	}
+	encoded, err := json.Marshal(in.InterruptionPolicy)
+	if err != nil || json.Unmarshal(encoded, &policy) != nil ||
+		(policy.Cooldown != nil && (*policy.Cooldown < 1 || *policy.Cooldown > 3600)) ||
+		(policy.Maximum != nil && (*policy.Maximum < 0 || *policy.Maximum > 100)) ||
+		(policy.Priority != nil && (*policy.Priority < 0 || *policy.Priority > 1)) {
+		problems = append(problems, "interruption policy requires cooldown_s 1–3600, max_per_stage 0–100 and min_priority 0–1")
 	}
 	for _, c := range in.Capabilities {
 		if !oneOf(c, Capabilities) {

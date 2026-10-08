@@ -37,10 +37,11 @@ type Member struct {
 }
 
 type Team struct {
-	ID        uuid.UUID `json:"id"`
-	Name      string    `json:"name"`
-	Members   []Member  `json:"members"`
-	CreatedAt time.Time `json:"created_at"`
+	MembershipLocked bool      `json:"membership_locked"`
+	ID               uuid.UUID `json:"id"`
+	Name             string    `json:"name"`
+	Members          []Member  `json:"members"`
+	CreatedAt        time.Time `json:"created_at"`
 }
 
 type Store struct{ pool *pgxpool.Pool }
@@ -49,7 +50,7 @@ func NewStore(pool *pgxpool.Pool) *Store { return &Store{pool: pool} }
 
 func (s *Store) List(ctx context.Context, orgID uuid.UUID) ([]Team, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT t.id, t.name, t.created_at,
+		SELECT t.id, t.name, t.created_at, EXISTS(SELECT 1 FROM assignments a WHERE a.team_id=t.id AND a.organization_id=t.organization_id),
 		       u.id, u.full_name, u.email, m.role, m.speaking_order
 		FROM teams t
 		LEFT JOIN team_members m ON m.team_id = t.id
@@ -70,7 +71,7 @@ func (s *Store) List(ctx context.Context, orgID uuid.UUID) ([]Team, error) {
 		var fullName, email, role *string
 		var speakingOrder *int
 
-		if err := rows.Scan(&t.ID, &t.Name, &t.CreatedAt,
+		if err := rows.Scan(&t.ID, &t.Name, &t.CreatedAt, &t.MembershipLocked,
 			&userID, &fullName, &email, &role, &speakingOrder); err != nil {
 			return nil, fmt.Errorf("scan team: %w", err)
 		}
@@ -216,6 +217,14 @@ func (s *Store) Create(ctx context.Context, orgID, actorID uuid.UUID, in CreateI
 func (s *Store) Size(ctx context.Context, q interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
 }, orgID, teamID uuid.UUID) (members, speakers int, err error) {
+	var locked uuid.UUID
+	err = q.QueryRow(ctx, `SELECT id FROM teams WHERE id=$1 AND organization_id=$2 FOR SHARE`, teamID, orgID).Scan(&locked)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, 0, httpx.ErrNotFound()
+	}
+	if err != nil {
+		return 0, 0, fmt.Errorf("lock team membership: %w", err)
+	}
 
 	err = q.QueryRow(ctx, `
 		SELECT count(*)::int,

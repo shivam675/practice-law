@@ -13,6 +13,7 @@ type DirectoryUser = { id: string; full_name: string; email: string; roles: stri
 export function Teams() {
   const { can } = useAuth();
   const [creating, setCreating] = useState(false);
+  const [editing, setEditing] = useState<Team | null>(null);
 
   const teams = useQuery({
     queryKey: ["teams"],
@@ -40,12 +41,13 @@ export function Teams() {
         }
       />
 
-      {creating ? <CreateTeam onDone={() => setCreating(false)} /> : null}
+      {creating ? <TeamForm onDone={() => setCreating(false)} /> : null}
+      {editing ? <TeamForm key={editing.id} team={editing} onDone={() => setEditing(null)} /> : null}
 
       {teams.isPending ? <SkeletonRows rows={2} /> : null}
       {teams.error ? <ErrorState error={teams.error} /> : null}
 
-      {teams.data && teams.data.teams.length === 0 && !creating ? (
+      {teams.data && !teams.data.teams?.length && !creating ? (
         <EmptyState
           title="No teams yet"
           action={can("team.create") ? <Button onClick={() => setCreating(true)}>Create a team</Button> : undefined}
@@ -56,9 +58,10 @@ export function Teams() {
       ) : null}
 
       <ul className="grid gap-3 md:grid-cols-2">
-        {teams.data?.teams.map((team) => (
+        {teams.data?.teams?.map((team) => (
           <Surface as="li" key={team.id} className="px-5 py-4">
             <h2 className="text-base">{team.name}</h2>
+            {can("team.edit") && <Button size="sm" variant="secondary" onClick={() => { setCreating(false); setEditing(team); }}>Edit team</Button>}
             <ul className="mt-3 space-y-2">
               {team.members.map((member) => (
                 <li key={member.user_id} className="flex items-center justify-between gap-3 text-sm">
@@ -83,25 +86,25 @@ export function Teams() {
 
 type Draft = { userId: string; role: "speaker" | "researcher" };
 
-function CreateTeam({ onDone }: { onDone: () => void }) {
+function TeamForm({ onDone, team }: { onDone: () => void; team?: Team }) {
   const queryClient = useQueryClient();
-  const [name, setName] = useState("");
-  const [members, setMembers] = useState<Draft[]>([{ userId: "", role: "speaker" }]);
+  const [name, setName] = useState(team?.name ?? "");
+  const [members, setMembers] = useState<Draft[]>(team?.members.map(m => ({userId:m.user_id,role:m.role})) ?? [{ userId: "", role: "speaker" }]);
 
   const directory = useQuery({
     queryKey: ["users"],
     queryFn: () => api.get<{ users: DirectoryUser[] }>("/users?limit=200"),
   });
 
-  const students =
-    directory.data?.users.filter((u) => u.roles.includes("student")) ??
-    directory.data?.users ??
-    [];
+  const students = directory.data?.users.filter(u => u.roles.includes("student") || members.some(m => m.userId === u.id)) ?? [];
+  for (const m of team?.members ?? []) {
+    if (!students.some(u => u.id === m.user_id)) students.push({id:m.user_id,full_name:m.full_name,email:m.email,roles:[]});
+  }
 
   const create = useMutation({
     mutationFn: () => {
       let order = 0;
-      return api.post<Team>("/teams", {
+      const body = {
         name,
         members: members
           .filter((m) => m.userId)
@@ -110,7 +113,8 @@ function CreateTeam({ onDone }: { onDone: () => void }) {
             role: m.role,
             speaking_order: m.role === "speaker" ? ++order : null,
           })),
-      });
+      };
+      return team ? api.put(`/teams/${team.id}`, body) : api.post<Team>("/teams", body);
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["teams"] });
@@ -122,7 +126,9 @@ function CreateTeam({ onDone }: { onDone: () => void }) {
 
   return (
     <Surface className="mb-8 px-5 py-5">
-      <h2 className="text-lg">New team</h2>
+      <h2 className="text-lg">{team ? "Edit team" : "New team"}</h2>
+      {team?.membership_locked && <p className="mt-2 text-sm text-ink-muted">This team has assessment history. Its name can change; create a new team to change members or speaking order.</p>}
+      {directory.error && <ErrorState error={directory.error} />}
       <p className="mt-1 text-sm text-ink-muted">
         Speaking order is assigned top to bottom from the speakers you list.
       </p>
@@ -148,7 +154,7 @@ function CreateTeam({ onDone }: { onDone: () => void }) {
           </Field>
         </div>
 
-        <fieldset>
+        <fieldset disabled={team?.membership_locked || create.isPending}>
           <legend className="text-sm font-medium">Members</legend>
           <ul className="mt-3 space-y-3">
             {members.map((member, index) => (
@@ -217,7 +223,7 @@ function CreateTeam({ onDone }: { onDone: () => void }) {
 
         <div className="flex gap-3">
           <Button type="submit" disabled={create.isPending || !members.some((m) => m.userId)}>
-            {create.isPending ? "Creating" : "Create team"}
+            {create.isPending ? "Saving…" : team ? "Save team" : "Create team"}
           </Button>
           <Button type="button" variant="ghost" onClick={onDone}>
             Cancel

@@ -1,4 +1,4 @@
-param([switch]$Speech)
+param([switch]$Speech, [switch]$Regrade)
 $ErrorActionPreference = 'Stop'
 $settings = @{}
 Get-Content (Join-Path $PSScriptRoot '..\.env') | ForEach-Object { if ($_ -match '^([A-Z0-9_]+)=(.*)$') { $settings[$Matches[1]] = $Matches[2].Trim() } }
@@ -67,8 +67,12 @@ Check $reply.saved 'Transcript persisted'
 Call POST '/media/turn' $ticket $turn | Out-Null
 $live=Call GET "/sessions/$($joined.id)" $student
 Check (@($live.transcript | Where-Object speaker -ne 'Examiner').Count -eq ($beforeCount+1)) 'Duplicate turn is not stored twice'
+$watch=[Diagnostics.Stopwatch]::StartNew()
 $question=Call POST '/media/question' $ticket
-Check ([bool]$question.question) 'Configured judge returned a question'
+$watch.Stop()
+$live=Call GET "/sessions/$($joined.id)" $student
+Check ([bool]$question.question -or @($live.transcript | Where-Object speaker -eq 'Examiner').Count -gt 0) 'Configured judge returned a question'
+Check ($watch.Elapsed.TotalSeconds -lt 5) "Question path bounded: $($watch.Elapsed.TotalSeconds.ToString('F2')) seconds"
 Denied 404 {Call GET "/sessions/$($joined.id)" $other}
 $hidden=Call GET "/assignments/$($assignment.id)/report" $student
 Check ($hidden.status -eq 'unpublished' -and $hidden.scores.Count -eq 0) 'Draft scores are hidden from the student'
@@ -78,6 +82,15 @@ foreach($i in 1..300){$report=Call GET "/assignments/$($assignment.id)/report" $
 Check ($report.scores.Count -eq 1) 'Configured source stages graded'
 Denied 403 {Call POST "/assignments/$($assignment.id)/report/publish" $student @{notes='Student cannot publish'}}
 $score=$report.scores[0]
+if ($Regrade) {
+    Denied 403 {Call POST "/assignments/$($assignment.id)/report/regrade" $student @{score_id=$score.id;reason='Not permitted'}}
+    Denied 400 {Call POST "/assignments/$($assignment.id)/report/regrade" $teacher @{score_id=$score.id;reason=''}}
+    Call POST "/assignments/$($assignment.id)/report/regrade" $teacher @{score_id=$score.id;reason='Development verification of one-criterion regrading.'} | Out-Null
+    $report=Call GET "/assignments/$($assignment.id)/report" $teacher
+    Check ($report.scores.Count -eq 1 -and $report.scores[0].id -ne $score.id) 'Regrade replaced the criterion in a complete new evaluation'
+    Denied 409 {Call POST "/assignments/$($assignment.id)/report/regrade" $teacher @{score_id=$score.id;reason='Stale score must be rejected'}}
+    $score=$report.scores[0]
+}
 Call PATCH "/assignments/$($assignment.id)/report/scores" $teacher @{score_id=$score.id;score=8;reason='Development check: verified the recorded reasoning.'} | Out-Null
 $published=Call POST "/assignments/$($assignment.id)/report/publish" $teacher @{notes='Development smoke test. Review the record before making each claim.'}
 Check ($published.total -eq 80 -and $published.maximum -eq 100) 'Teacher override updates the weighted total'

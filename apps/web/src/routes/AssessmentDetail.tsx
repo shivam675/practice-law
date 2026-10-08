@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { AssessmentResources } from "./AssessmentResources";
 import { Link, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, type Assessment, type Assignment, type Team } from "../lib/api";
@@ -67,6 +68,8 @@ export function AssessmentDetail() {
           />
         </dl>
       </Surface>
+
+      {version.data && (can("knowledge.view") || can("knowledge.upload")) && <AssessmentResources assessmentId={assessmentId} sides={version.data.participation.sides} />}
 
       {can("assessment.assign") && version.data ? (
         <AssignTeam assessmentId={assessmentId} participation={version.data.participation} />

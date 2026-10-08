@@ -169,10 +169,13 @@ function ProfileForm({
   const [prompt, setPrompt] = useState(profile?.system_prompt ?? "");
   const [temperature, setTemperature] = useState(profile?.temperature ?? 0.4);
   const [voice, setVoice] = useState(profile?.voice ?? "");
+  const [cooldown, setCooldown] = useState(Number(profile?.interruption_policy.cooldown_s ?? 25));
+  const [maximum, setMaximum] = useState(Number(profile?.interruption_policy.max_per_stage ?? 8));
+  const [priority, setPriority] = useState(Number(profile?.interruption_policy.min_priority ?? 0.65));
   const [focus, setFocus] = useState((profile?.focus ?? []).join(", "));
   const [ragSources, setRagSources] = useState((profile?.rag_sources ?? []).join(", "));
   const [capabilities, setCapabilities] = useState<string[]>(
-    profile?.capabilities ?? ["ask_question", "evaluate"],
+    profile?.capabilities ?? ["ask_question", "interrupt", "evaluate"],
   );
 
   const save = useMutation({
@@ -186,7 +189,7 @@ function ProfileForm({
         temperature,
         voice,
         personality: profile?.personality ?? {},
-        interruption_policy: profile?.interruption_policy ?? {},
+        interruption_policy: { ...profile?.interruption_policy, cooldown_s: cooldown, max_per_stage: maximum, min_priority: priority },
         focus: splitList(focus),
         capabilities,
         rag_sources: splitList(ragSources),
@@ -289,7 +292,7 @@ function ProfileForm({
           )}
         </Field>
 
-        <Field label="Voice" helper="Blank until the media plane exists.">
+        <Field label="Voice" helper="Local Kokoro voice ID. Leave blank for the default voice.">
           {({ id, describedBy }) => (
             <TextInput
               id={id}
@@ -343,6 +346,12 @@ function ProfileForm({
           ))}
         </div>
       </fieldset>
+
+      <div className="grid gap-5 md:grid-cols-3">
+        <Field label="Question cooldown (seconds)">{({ id }) => <TextInput id={id} type="number" required min={1} max={3600} step={1} value={cooldown} onChange={(e) => setCooldown(Number(e.target.value))} />}</Field>
+        <Field label="Maximum questions per stage">{({ id }) => <TextInput id={id} type="number" required min={0} max={100} step={1} value={maximum} onChange={(e) => setMaximum(Number(e.target.value))} />}</Field>
+        <Field label="Minimum question priority">{({ id }) => <TextInput id={id} type="number" required min={0} max={1} step={0.05} value={priority} onChange={(e) => setPriority(Number(e.target.value))} />}</Field>
+      </div>
 
       <div className="grid gap-5 md:grid-cols-2">
         <Field label="Focus" helper="Comma separated. What this actor presses on.">

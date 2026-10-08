@@ -62,13 +62,14 @@ func (s *Store) Resources(ctx context.Context, orgID, assignmentID uuid.UUID,
 		SELECT ks.id, ks.kind, ks.title,
 		       coalesce((
 		         SELECT d.extracted_text FROM documents d
-		         WHERE d.knowledge_source_id = ks.id AND d.parse_status = 'parsed'
+		         WHERE d.knowledge_source_id = ks.id AND d.organization_id=ks.organization_id AND d.parse_status = 'parsed'
 		         ORDER BY d.created_at LIMIT 1
 		       ), '')
 		FROM knowledge_sources ks
 		WHERE ks.organization_id = $1
 		  AND (ks.assessment_id = $2 OR ks.assessment_id IS NULL)
 		  AND ks.visibility IN ('all', $3)
+		  AND ks.visibility <> 'staff'
 		ORDER BY CASE ks.kind
 		           WHEN 'problem' THEN 0 WHEN 'statute' THEN 1
 		           WHEN 'authority' THEN 2 WHEN 'evidence' THEN 3 ELSE 4 END,

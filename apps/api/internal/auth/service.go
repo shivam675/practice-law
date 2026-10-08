@@ -115,8 +115,10 @@ func (s *Service) Login(ctx context.Context, in LoginInput) (Tokens, error) {
 
 	if needsRehash {
 		if newHash, herr := HashPassword(in.Password); herr == nil {
-			if uerr := s.store.UpdatePasswordHash(ctx, user.ID, newHash); uerr != nil {
+			if uerr := s.store.UpdatePasswordHash(ctx, user.ID, user.OrganizationID, newHash, user.PasswordHash); uerr != nil {
 				httpx.LoggerFrom(ctx).Error("rehash password", "error", uerr)
+			} else {
+				user.PasswordHash = newHash
 			}
 		}
 	}
@@ -271,7 +273,10 @@ func (s *Service) issue(ctx context.Context, user User, familyID uuid.UUID,
 		FamilyID:       familyID,
 		ExpiresAt:      time.Now().Add(s.tokens.RefreshTTL()),
 	}
-	if err := s.store.InsertRefreshToken(ctx, rec, digest, parentID, userAgent, ip); err != nil {
+	if err := s.store.InsertRefreshToken(ctx, rec, digest, parentID, userAgent, ip, user.PasswordHash); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return Tokens{}, httpx.ErrUnauthorized()
+		}
 		return Tokens{}, err
 	}
 

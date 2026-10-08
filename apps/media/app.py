@@ -8,6 +8,7 @@ import os
 import re
 import time
 import uuid
+from datetime import datetime
 from contextlib import asynccontextmanager
 from functools import lru_cache
 
@@ -75,9 +76,22 @@ def transcribe(audio):
     return text
 
 
+def transcribe_prefix(audio):
+    # Keep a second of context and cut after a recognized word, never mid-word.
+    segments, _ = whisper.transcribe(audio, language="en", beam_size=3,
+                                    condition_on_previous_text=False, vad_filter=False,
+                                    word_timestamps=True,
+                                    initial_prompt=os.environ.get("STT_GLOSSARY") or None)
+    words = [word for segment in segments for word in (segment.words or [])
+             if word.end <= len(audio) / RATE - 1]
+    if not words:
+        raise ValueError("Could not find a safe speech boundary; reconnect to continue")
+    return "".join(word.word for word in words).strip(), int(words[-1].end * RATE)
+
+
 @lru_cache(maxsize=64)
-def speak(text):
-    chunks = [audio.numpy() for _, _, audio in voice(text, voice=os.environ.get("TTS_VOICE", "af_heart")) if audio is not None]
+def speak(text, voice_name=""):
+    chunks = [audio.numpy() for _, _, audio in voice(text, voice=voice_name or os.environ.get("TTS_VOICE", "af_heart")) if audio is not None]
     if not chunks:
         raise ValueError("Speech model returned no audio")
     stream = io.BytesIO()
@@ -85,9 +99,9 @@ def speak(text):
     return stream.getvalue()
 
 
-async def infer(function, value):
+async def infer(function, value, *, speech=False):
     # Each model is serialized; generating a voice never locks transcription.
-    async with (stt_lock if function is transcribe else tts_lock):
+    async with (stt_lock if speech or function is transcribe else tts_lock):
         task = asyncio.create_task(asyncio.to_thread(function, value))
         try:
             return await asyncio.shield(task)
@@ -108,7 +122,7 @@ async def judge(ws, client):
             await ws.send_json({"type": "question", "text": question})
             try:
                 for sentence in re.split(r"(?<=[.!?])\s+", question):
-                    await ws.send_bytes(await infer(speak, sentence))
+                    await ws.send_bytes(await infer(lambda text: speak(text, result.get("voice", "")), sentence))
             except Exception:
                 log.exception("synthesize question")
                 await ws.send_json({"type": "warning", "message": "Voice is unavailable. Read the question on screen."})
@@ -116,9 +130,22 @@ async def judge(ws, client):
         log.exception("judge request failed")
 
 
-async def receive_audio(ws, queue):
+async def receive_audio(ws, queue, deadline=None):
     while True:
-        message = await asyncio.wait_for(ws.receive(), 30)
+        remaining = deadline - time.time() if deadline is not None else 30
+        if remaining <= 0:
+            await queue.put(None)
+            return
+        try:
+            message = await asyncio.wait_for(ws.receive(), min(30, remaining))
+        except asyncio.TimeoutError:
+            if deadline is not None and time.time() >= deadline:
+                await queue.put(None)
+                return
+            raise
+        if deadline is not None and time.time() >= deadline:
+            await queue.put(None)
+            return
         if message["type"] == "websocket.disconnect":
             await queue.put(None)
             return
@@ -164,16 +191,20 @@ async def process_audio(ws, client, queue, claims):
                 elif active:
                     silence_samples += len(block)
             # Endpointing follows audio time, so slow inference cannot invent silence.
-            final = (active and (finishing or silence_samples >= RATE * END_SILENCE or len(audio) >= RATE * 25)) or (finishing and len(audio) >= RATE // 10 and np.max(np.abs(audio)) > 0.005)
+            split = active and not finishing and silence_samples < RATE * END_SILENCE and len(audio) >= RATE * 25
+            final = (active and (finishing or silence_samples >= RATE * END_SILENCE or split)) or (finishing and len(audio) >= RATE // 10 and np.max(np.abs(audio)) > 0.005)
             partial = active and queue.empty() and time.monotonic() - partial_at >= PARTIAL_INTERVAL
             if final or partial:
-                text = await infer(transcribe, audio)
+                if split:
+                    text, consumed = await infer(transcribe_prefix, audio, speech=True)
+                else:
+                    text, consumed = await infer(transcribe, audio), len(audio)
                 partial_at = time.monotonic()
                 if text:
                     await ws.send_json({"type": "transcript_final" if final else "transcript_partial", "text": text})
                 if final:
                     if text:
-                        body = {"id": str(uuid.uuid4()), "text": text, "duration_ms": int(len(audio) * 1000 / RATE)}
+                        body = {"id": str(uuid.uuid4()), "text": text, "duration_ms": int(consumed * 1000 / RATE)}
                         # Stable ID makes an uncertain response safe to retry.
                         for attempt in range(3):
                             try:
@@ -184,10 +215,10 @@ async def process_audio(ws, client, queue, claims):
                                 if attempt == 2:
                                     raise
                         await ws.send_json({"type": "saved"})
-                        if not finishing and (judge_task is None or judge_task.done()):
+                        if not finishing and not split and (judge_task is None or judge_task.done()):
                             judge_task = asyncio.create_task(judge(ws, client))
-                    audio = np.empty(0, dtype=np.float32)
-                    active = False
+                    audio = audio[consumed:]
+                    active = split
                     silence_samples = 0
             if finishing:
                 await ws.send_json({"type": "drained"})
@@ -228,12 +259,16 @@ async def speech(ws: WebSocket):
         async with httpx.AsyncClient(timeout=180, headers={"Authorization": "Bearer " + ticket, "X-Media-Service-Token": TOKEN}) as client:
             verified = await client.get(API + "/media/session")
             verified.raise_for_status()
+            deadline = datetime.fromisoformat(verified.json()["ends_at"].replace("Z", "+00:00")).timestamp()
             await ws.send_json({"type": "ready"})
             queue = asyncio.Queue(maxsize=100)
-            tasks = [asyncio.create_task(receive_audio(ws, queue)), asyncio.create_task(process_audio(ws, client, queue, claims))]
+            tasks = [asyncio.create_task(receive_audio(ws, queue, deadline)), asyncio.create_task(process_audio(ws, client, queue, claims))]
             done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
             for task in done:
                 task.result()
+            if time.time() >= deadline:
+                response = await client.post(API + "/media/finish")
+                response.raise_for_status()
     except WebSocketDisconnect:
         pass
     except Exception:

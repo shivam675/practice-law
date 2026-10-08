@@ -6,6 +6,7 @@ import asyncio
 import json
 import sys
 import time
+import re
 
 import numpy as np
 from kokoro import KPipeline
@@ -15,7 +16,9 @@ from websockets.asyncio.client import connect
 async def main():
     request = json.load(sys.stdin)
     voice = KPipeline(lang_code="a", device="cpu")
+    synthesis_started = time.monotonic()
     audio = np.concatenate([a.numpy() for _, _, a in voice(request["text"], voice="af_heart") if a is not None])
+    print(f"TTS: {time.monotonic() - synthesis_started:.2f}s for {len(audio)/24000:.2f}s of audio", flush=True)
     audio = np.interp(np.arange(0, len(audio), 1.5), np.arange(len(audio)), audio)
     pcm = (np.clip(audio, -1, 1) * 32767).astype("<i2").tobytes()
     pcm += bytes(16000 * 2 * 2)
@@ -29,6 +32,7 @@ async def main():
             await ws.send(json.dumps({"type": "finish"}))
         sender = asyncio.create_task(send())
         saved = False
+        transcript = []
         started = time.monotonic()
         while True:
             response = await asyncio.wait_for(ws.recv(), 120)
@@ -38,7 +42,7 @@ async def main():
             event = json.loads(response)
             assert event["type"] != "error", event
             if event["type"] == "transcript_final":
-                assert len(event["text"].split()) > 8, event
+                transcript.append(event["text"])
                 print("PASS: Whisper transcribed Kokoro speech", flush=True)
             if event["type"] == "saved":
                 saved = True
@@ -46,7 +50,18 @@ async def main():
                 assert saved, "Speech was not persisted before completion"
                 break
         await sender
-        print(f"PASS: speech saved and drained in {time.monotonic() - started:.1f}s", flush=True)
+        expected = re.findall(r"\w+", request["text"].lower())
+        actual = re.findall(r"\w+", " ".join(transcript).lower())
+        distance = list(range(len(actual) + 1))
+        for i, word in enumerate(expected, 1):
+            row = [i]
+            for j, got in enumerate(actual, 1):
+                row.append(min(row[-1]+1, distance[j]+1, distance[j-1]+(word != got)))
+            distance = row
+        error_rate = distance[-1] / max(1, len(expected))
+        assert error_rate < .15, f"Word error rate {error_rate:.1%}: {' '.join(transcript)}"
+        elapsed = time.monotonic() - started
+        print(f"PASS: speech saved in {elapsed:.1f}s; drain overhead {elapsed-len(pcm)/32000:.1f}s; word error rate {error_rate:.1%}", flush=True)
 
 
 asyncio.run(main())

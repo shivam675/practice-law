@@ -7,6 +7,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/intelimek/megamoot/apps/api/internal/auth"
+	"github.com/intelimek/megamoot/apps/api/internal/grading"
 	"github.com/intelimek/megamoot/apps/api/internal/httpx"
 	"github.com/intelimek/megamoot/apps/api/internal/workflow"
 	"github.com/jackc/pgx/v5"
@@ -20,9 +21,40 @@ import (
 type Handlers struct {
 	pool   *pgxpool.Pool
 	engine *workflow.Engine
+	grader *grading.Store
 }
 
-func New(pool *pgxpool.Pool, engine *workflow.Engine) *Handlers { return &Handlers{pool, engine} }
+func New(pool *pgxpool.Pool, engine *workflow.Engine, grader *grading.Store) *Handlers {
+	return &Handlers{pool, engine, grader}
+}
+
+func (h *Handlers) Regrade(w http.ResponseWriter, r *http.Request) {
+	id, org, err := h.access(r)
+	if err != nil {
+		httpx.Fail(w, r, err)
+		return
+	}
+	var in struct {
+		ScoreID uuid.UUID `json:"score_id"`
+		Reason  string    `json:"reason"`
+	}
+	if err = httpx.DecodeJSON(w, r, &in); err != nil {
+		httpx.Fail(w, r, err)
+		return
+	}
+	// Long records need several bounded model calls; extend only this response.
+	if err = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(15 * time.Minute)); err != nil {
+		httpx.Fail(w, r, err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 14*time.Minute)
+	defer cancel()
+	if err = h.grader.Regrade(ctx, org, id, in.ScoreID, auth.MustPrincipal(r.Context()).UserID, in.Reason); err != nil {
+		httpx.Fail(w, r, err)
+		return
+	}
+	httpx.JSON(w, r, 200, map[string]bool{"saved": true})
+}
 
 type Score struct {
 	ID        uuid.UUID       `json:"id"`

@@ -22,7 +22,10 @@ const staffNav: NavItem[] = [
   { to: "/teams", label: "Teams", icon: UsersThree, permission: "team.view" },
   { to: "/admin/users", label: "People", icon: UsersThree, permission: "user.view" },
   { to: "/templates", label: "Templates", icon: Stack, permission: "template.view" },
+  { to: "/rubrics", label: "Rubrics", icon: Stack, permission: "rubric.view" },
   { to: "/admin/actors", label: "AI actors", icon: Robot, permission: "ai_profile.view" },
+  { to: "/admin/organization", label: "Organisation", icon: House, permission: "organization.edit" },
+  { to: "/admin/organizations", label: "Organisations", icon: House, permission: "platform.organization.manage" },
   // Platform operators only. Everyone else never sees this exists.
   {
     to: "/admin/models",

@@ -201,7 +201,9 @@ func (s *Store) GradeSubmission(ctx context.Context, t Target) (result Result, r
 func (s *Store) gradeOne(ctx context.Context, t Target, sub submission,
 	c rubrics.Criterion, sourceText string) (*criterionResult, error) {
 	record, err := s.assessmentRecord(ctx, t, c, sourceText)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	blocks := []harness.Untrusted{{
 		Label: "assessment_record",
 		Text:  record,
@@ -473,6 +475,14 @@ func (s *Store) persistCriterion(ctx context.Context, t Target, evaluationID uui
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
 
+	if err := s.persistCriterionTx(ctx, tx, t, evaluationID, sub, c, scored, sourceText); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func (s *Store) persistCriterionTx(ctx context.Context, tx pgx.Tx, t Target, evaluationID uuid.UUID,
+	sub submission, c rubrics.Criterion, scored *criterionResult, sourceText string) error {
 	var scoreID uuid.UUID
 	if err := tx.QueryRow(ctx, `
 		INSERT INTO criterion_scores
@@ -522,9 +532,6 @@ func (s *Store) persistCriterion(ctx context.Context, t Target, evaluationID uui
 		}
 	}
 
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit criterion %s: %w", c.Key, err)
-	}
 	return nil
 }
 

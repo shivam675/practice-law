@@ -5,7 +5,6 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -131,6 +130,17 @@ func (h *Handlers) Join(w http.ResponseWriter, r *http.Request) {
 			httpx.Fail(w, r, err)
 			return
 		}
+		_, err = tx.Exec(r.Context(), `INSERT INTO session_participants(organization_id,session_id,kind,role,ai_profile_id,display_name,is_presiding,joined_at)
+ SELECT $1,$2,'ai',slot->>'role',p.id,slot->>'display_name',coalesce((slot->>'presiding')::boolean,false),now()
+ FROM assignments a JOIN assessments ass ON ass.id=a.assessment_id AND ass.organization_id=a.organization_id
+ JOIN assessment_template_versions tv ON tv.id=ass.template_version_id
+ CROSS JOIN LATERAL jsonb_array_elements(tv.participation->'ai_actors') slot
+ JOIN LATERAL (SELECT id FROM ai_profiles WHERE organization_id=$1 AND key=slot->>'profile_key' AND is_active ORDER BY version DESC LIMIT 1) p ON true
+ WHERE a.id=$3 AND a.organization_id=$1`, p.OrganizationID, sessionID, assignment)
+		if err != nil {
+			httpx.Fail(w, r, err)
+			return
+		}
 		for _, to := range []string{workflow.SessionLobby, workflow.SessionDeviceCheck, workflow.SessionRunning} {
 			_, err = h.engine.ApplyTx(r.Context(), tx, workflow.Request{Subject: workflow.SubjectSession, SubjectID: sessionID, OrganizationID: p.OrganizationID, To: to, Cause: "participant_joined", Actor: workflow.UserActor(p.UserID)})
 			if err != nil {
@@ -138,7 +148,8 @@ func (h *Handlers) Join(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		if err = workflow.Schedule(r.Context(), tx, p.OrganizationID, workflow.SubjectSession, sessionID, workflow.SessionEnded, "time_elapsed", "end", time.Now().Add(time.Duration(cfg.DurationS)*time.Second)); err != nil {
+		// Capture stops at the speaking deadline; allow buffered inference to drain.
+		if err = workflow.Schedule(r.Context(), tx, p.OrganizationID, workflow.SubjectSession, sessionID, workflow.SessionEnded, "time_elapsed", "drain_end", time.Now().Add(time.Duration(cfg.DurationS+120)*time.Second)); err != nil {
 			httpx.Fail(w, r, err)
 			return
 		}
@@ -200,7 +211,7 @@ func (h *Handlers) Get(w http.ResponseWriter, r *http.Request) {
 }
 func (h *Handlers) respond(w http.ResponseWriter, r *http.Request, id, org uuid.UUID) {
 	out := Session{ID: id, Transcript: []Turn{}}
-	err := h.pool.QueryRow(r.Context(), `SELECT s.status,s.started_at,(SELECT run_at FROM scheduled_transitions WHERE subject_kind='session' AND subject_id=s.id AND cause_key='end' LIMIT 1) FROM sessions s WHERE s.id=$1 AND s.organization_id=$2`, id, org).Scan(&out.Status, &out.StartedAt, &out.EndsAt)
+	err := h.pool.QueryRow(r.Context(), `SELECT s.status,s.started_at,(SELECT run_at-CASE WHEN cause_key='drain_end' THEN interval '120 seconds' ELSE interval '0 seconds' END FROM scheduled_transitions WHERE subject_kind='session' AND subject_id=s.id AND cause_key IN ('end','drain_end') LIMIT 1) FROM sessions s WHERE s.id=$1 AND s.organization_id=$2`, id, org).Scan(&out.Status, &out.StartedAt, &out.EndsAt)
 	if err != nil {
 		httpx.Fail(w, r, err)
 		return
@@ -249,14 +260,14 @@ func (h *Handlers) End(w http.ResponseWriter, r *http.Request) {
 	}
 	h.respond(w, r, id, p.OrganizationID)
 }
-func (h *Handlers) claims(r *http.Request) (*Claims, error) {
+func (h *Handlers) claims(r *http.Request, draining bool) (*Claims, error) {
 	c := &Claims{}
 	_, err := jwt.ParseWithClaims(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "), c, func(t *jwt.Token) (any, error) { return h.secret, nil }, jwt.WithValidMethods([]string{"HS256"}), jwt.WithAudience("megamoot-media"), jwt.WithExpirationRequired())
 	if err != nil {
 		return nil, httpx.ErrUnauthorized()
 	}
 	var valid bool
-	err = h.pool.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM sessions s JOIN session_participants p ON p.session_id=s.id WHERE s.id=$1 AND s.organization_id=$2 AND p.user_id=$3 AND s.status='running' AND NOT EXISTS(SELECT 1 FROM scheduled_transitions t WHERE t.subject_id=s.id AND t.cause_key='end' AND t.run_at<=now()))`, c.SessionID, c.OrgID, c.Subject).Scan(&valid)
+	err = h.pool.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM sessions s JOIN session_participants p ON p.session_id=s.id WHERE s.id=$1 AND s.organization_id=$2 AND p.user_id=$3 AND s.status='running' AND NOT EXISTS(SELECT 1 FROM scheduled_transitions t WHERE t.subject_id=s.id AND t.cause_key IN ('end','drain_end') AND t.run_at-CASE WHEN t.cause_key='drain_end' AND NOT $4 THEN interval '120 seconds' ELSE interval '0 seconds' END<=now()))`, c.SessionID, c.OrgID, c.Subject, draining).Scan(&valid)
 	if err != nil {
 		return nil, err
 	}
@@ -266,19 +277,38 @@ func (h *Handlers) claims(r *http.Request) (*Claims, error) {
 	return c, nil
 }
 func (h *Handlers) Verify(w http.ResponseWriter, r *http.Request) {
-	c, err := h.claims(r)
+	c, err := h.claims(r, false)
 	if err != nil {
 		httpx.Fail(w, r, err)
 		return
 	}
 	h.respond(w, r, c.SessionID, c.OrgID)
 }
+
+// Finish is called by the trusted media service only after buffered audio is saved.
+func (h *Handlers) Finish(w http.ResponseWriter, r *http.Request) {
+	if subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Media-Service-Token")), h.secret) != 1 {
+		httpx.Fail(w, r, httpx.ErrUnauthorized())
+		return
+	}
+	c, err := h.claims(r, true)
+	if err != nil {
+		httpx.Fail(w, r, err)
+		return
+	}
+	err = h.engine.Apply(r.Context(), workflow.Request{Subject: workflow.SubjectSession, SubjectID: c.SessionID, OrganizationID: c.OrgID, To: workflow.SessionEnded, Cause: "speech_drained", Actor: workflow.SystemActor()})
+	if err != nil && !errors.Is(err, workflow.ErrNoop) {
+		httpx.Fail(w, r, err)
+		return
+	}
+	httpx.JSON(w, r, 200, map[string]bool{"saved": true})
+}
 func (h *Handlers) Turn(w http.ResponseWriter, r *http.Request) {
 	if subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Media-Service-Token")), h.secret) != 1 {
 		httpx.Fail(w, r, httpx.ErrUnauthorized())
 		return
 	}
-	c, err := h.claims(r)
+	c, err := h.claims(r, true)
 	if err != nil {
 		httpx.Fail(w, r, err)
 		return
@@ -352,7 +382,7 @@ func (h *Handlers) Question(w http.ResponseWriter, r *http.Request) {
 		httpx.Fail(w, r, httpx.ErrUnauthorized())
 		return
 	}
-	c, err := h.claims(r)
+	c, err := h.claims(r, false)
 	if err != nil {
 		httpx.Fail(w, r, err)
 		return
@@ -370,53 +400,12 @@ func (h *Handlers) Question(w http.ResponseWriter, r *http.Request) {
 		httpx.JSON(w, r, 200, map[string]string{"warning": "The judge is unavailable. Your transcript was saved."})
 		return
 	}
-	httpx.JSON(w, r, 200, map[string]string{"question": question})
-}
-func (h *Handlers) question(ctx context.Context, c *Claims, assignment uuid.UUID, stage string) (string, error) {
-	var recent bool
-	var raw []byte
-	var record string
-	err := h.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM session_events WHERE session_id=$1 AND organization_id=$2 AND type='judge_question' AND created_at>now()-interval '25 seconds')`, c.SessionID, c.OrgID).Scan(&recent)
-	if err != nil || recent {
-		return "", err
+	voice, name := "af_heart", "Examiner"
+	if question != "" {
+		if err = h.pool.QueryRow(r.Context(), `SELECT coalesce(payload->>'voice','af_heart'),coalesce(payload->>'speaker','Examiner') FROM session_events WHERE session_id=$1 AND organization_id=$2 AND type='judge_question' ORDER BY seq DESC LIMIT 1`, c.SessionID, c.OrgID).Scan(&voice, &name); err != nil {
+			httpx.Fail(w, r, err)
+			return
+		}
 	}
-	err = h.pool.QueryRow(ctx, `SELECT v.value->'config' FROM assignments a JOIN assessments ass ON ass.id=a.assessment_id JOIN assessment_template_versions tv ON tv.id=ass.template_version_id CROSS JOIN LATERAL jsonb_array_elements(tv.stages) v(value) WHERE a.id=$1 AND a.organization_id=$2 AND v.value->>'id'=$3`, assignment, c.OrgID, stage).Scan(&raw)
-	if err != nil {
-		return "", err
-	}
-	var cfg spec.LiveTurnConfig
-	if err = json.Unmarshal(raw, &cfg); err != nil {
-		return "", err
-	}
-	if cfg.Interruptions == spec.InterruptionsDisabled {
-		return "", nil
-	}
-	err = h.pool.QueryRow(ctx, `SELECT coalesce(string_agg(text,E'\n' ORDER BY seq),'') FROM (SELECT seq,coalesce(payload->>'speaker','Participant')||': '||(payload->>'text') AS text FROM session_events WHERE session_id=$1 AND organization_id=$2 AND type IN ('transcript_final','judge_question') ORDER BY seq DESC LIMIT 12) turns`, c.SessionID, c.OrgID).Scan(&record)
-	if err != nil {
-		return "", err
-	}
-	question, err := h.harness.Text(ctx, harness.Call{Tier: "judge", Purpose: "live_question", PromptVersion: "live.v1", System: "You are the examiner in an oral assessment. Ask one short question about the reasoning in the supplied transcript. Ask for clarification or supporting evidence. Do not invent facts or authorities. Do not provide scores. Return only the question, at most 45 words.", Untrusted: []harness.Untrusted{{Label: "transcript", Text: record}}, User: "Ask the next question.", OrganizationID: &c.OrgID, AssignmentID: &assignment, SessionID: &c.SessionID})
-	if err != nil {
-		return "", err
-	}
-	question = strings.TrimSpace(question)
-	if question == "" || len(question) > 1500 {
-		return "", fmt.Errorf("invalid judge response: %d bytes", len(question))
-	}
-	tx, err := h.pool.Begin(ctx)
-	if err != nil {
-		return "", err
-	}
-	defer tx.Rollback(context.WithoutCancel(ctx))
-	var seq int64
-	err = tx.QueryRow(ctx, `UPDATE sessions SET last_seq=last_seq+1 WHERE id=$1 AND organization_id=$2 AND status='running' RETURNING last_seq`, c.SessionID, c.OrgID).Scan(&seq)
-	if err != nil {
-		return "", err
-	}
-	payload, _ := json.Marshal(map[string]string{"speaker": "Examiner", "text": question})
-	_, err = tx.Exec(ctx, `INSERT INTO session_events(session_id,seq,organization_id,type,actor_kind,payload) VALUES($1,$2,$3,'judge_question','ai',$4)`, c.SessionID, seq, c.OrgID, payload)
-	if err != nil {
-		return "", err
-	}
-	return question, tx.Commit(ctx)
+	httpx.JSON(w, r, 200, map[string]string{"question": question, "voice": voice, "speaker": name})
 }

@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { PasswordRecovery } from "./PasswordRecovery";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { useAuth } from "../lib/auth";
@@ -45,9 +46,11 @@ export function People() {
     {people.data?.users.length === 0 ? <EmptyState title="No people found">Try another name or email.</EmptyState> : null}
     <ul className="divide-y divide-rule">{people.data?.users.map((person) => <li key={person.id} className="py-5">
       <div className="flex flex-wrap items-center justify-between gap-3"><div><p className="font-medium">{person.full_name}</p><p className="text-sm text-ink-muted">{person.email}</p></div><div className="flex flex-wrap items-center gap-2">{person.roles.map((role) => <Badge key={role}>{humanise(role)}</Badge>)}<span className="text-sm text-ink-muted">{humanise(person.status)}</span>{can("user.assign_role") && person.id !== user?.id && <Button size="sm" variant="secondary" onClick={() => { update.reset(); setEditing(person); setRoles(person.roles); }}>Edit roles</Button>}</div></div>
+      {can("user.edit") && (person.status === "active" || person.status === "invited") && <PasswordRecovery userId={person.id} name={person.full_name} />}
       {editing?.id === person.id && <form className="mt-4 rounded-md bg-paper-sunken p-4" onSubmit={(e) => { e.preventDefault(); update.mutate(); }}><fieldset><legend className="mb-3 text-sm font-medium">Roles for {person.full_name}</legend><div className="flex flex-wrap gap-4">{catalogue.data?.roles.map((r) => <label key={r.key} className="flex items-center gap-2 text-sm"><input type="checkbox" checked={roles.includes(r.key)} onChange={(e) => setRoles(e.target.checked ? [...roles, r.key] : roles.filter((key) => key !== r.key))} />{r.name}</label>)}</div></fieldset>{update.error ? <ErrorState error={update.error} /> : null}<div className="mt-4 flex gap-2"><Button size="sm" type="submit" disabled={!roles.length || update.isPending}>Save roles</Button><Button size="sm" variant="ghost" onClick={() => setEditing(null)}>Cancel</Button></div></form>}
     </li>)}</ul>
     <div className="mt-6 flex justify-between"><Button variant="secondary" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - 25))}>Previous</Button><Button variant="secondary" disabled={people.data?.users.length !== 25} onClick={() => setOffset(offset + 25)}>Next</Button></div>
   </>;
 
 }
+

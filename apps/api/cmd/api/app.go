@@ -23,6 +23,7 @@ import (
 	"github.com/intelimek/megamoot/apps/api/internal/retrieval"
 	"github.com/intelimek/megamoot/apps/api/internal/rubrics"
 	"github.com/intelimek/megamoot/apps/api/internal/secrets"
+	"github.com/intelimek/megamoot/apps/api/internal/sessions"
 	"github.com/intelimek/megamoot/apps/api/internal/submissions"
 	"github.com/intelimek/megamoot/apps/api/internal/teams"
 	"github.com/intelimek/megamoot/apps/api/internal/templates"
@@ -152,4 +153,5 @@ func (a *app) startBackground(ctx context.Context) {
 	go a.scheduler.Run(ctx)
 	go a.indexer.Run(ctx)
 	go a.grader.Run(ctx)
+	go sessions.RunQuestionBank(ctx, a.pool, a.harness, a.log)
 }

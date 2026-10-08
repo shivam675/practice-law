@@ -120,18 +120,42 @@ func (s *Store) RecordLoginSuccess(ctx context.Context, userID uuid.UUID) error 
 	return nil
 }
 
-func (s *Store) UpdatePasswordHash(ctx context.Context, userID uuid.UUID, hash string) error {
-	_, err := s.pool.Exec(ctx, `UPDATE users SET password_hash = $2 WHERE id = $1`, userID, hash)
+func (s *Store) UpdatePasswordHash(ctx context.Context, userID, orgID uuid.UUID, hash, expected string) error {
+	tag, err := s.pool.Exec(ctx, `UPDATE users SET password_hash = $2 WHERE id = $1 AND password_hash=$3 AND organization_id=$4`, userID, hash, expected, orgID)
 	if err != nil {
 		return fmt.Errorf("update password hash: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return ErrNotFound
 	}
 	return nil
 }
 
 func (s *Store) InsertRefreshToken(ctx context.Context, rec RefreshRecord, digest []byte,
-	parentID *uuid.UUID, userAgent string, ip net.IP) error {
+	parentID *uuid.UUID, userAgent string, ip net.IP, expectedHash string) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(context.WithoutCancel(ctx))
+	var hash string
+	// Password resets lock this row exclusively before revoking every session.
+	err = tx.QueryRow(ctx, `SELECT coalesce(password_hash,'') FROM users WHERE id=$1 AND organization_id=$2 AND status='active' FOR SHARE`, rec.UserID, rec.OrganizationID).Scan(&hash)
+	if err != nil {
+		return fmt.Errorf("lock session user: %w", err)
+	}
+	if hash != expectedHash {
+		return ErrNotFound
+	}
+	var revoked bool
+	if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM refresh_tokens WHERE family_id=$1 AND organization_id=$2 AND revoked_at IS NOT NULL)`, rec.FamilyID, rec.OrganizationID).Scan(&revoked); err != nil {
+		return err
+	}
+	if revoked {
+		return ErrNotFound
+	}
 
-	_, err := s.pool.Exec(ctx, `
+	_, err = tx.Exec(ctx, `
 		INSERT INTO refresh_tokens
 			(id, user_id, organization_id, family_id, token_hash, parent_id,
 			 user_agent, ip, expires_at)
@@ -141,7 +165,7 @@ func (s *Store) InsertRefreshToken(ctx context.Context, rec RefreshRecord, diges
 	if err != nil {
 		return fmt.Errorf("insert refresh token: %w", err)
 	}
-	return nil
+	return tx.Commit(ctx)
 }
 
 func (s *Store) RefreshTokenByHash(ctx context.Context, digest []byte) (RefreshRecord, error) {

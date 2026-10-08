@@ -11,6 +11,7 @@ import (
 	"github.com/intelimek/megamoot/apps/api/internal/auth"
 	"github.com/intelimek/megamoot/apps/api/internal/authz"
 	"github.com/intelimek/megamoot/apps/api/internal/httpx"
+	"github.com/intelimek/megamoot/apps/api/internal/orgs"
 	"github.com/intelimek/megamoot/apps/api/internal/platformcfg"
 	"github.com/intelimek/megamoot/apps/api/internal/reports"
 	"github.com/intelimek/megamoot/apps/api/internal/rubrics"
@@ -44,6 +45,7 @@ func newRouter(a *app) http.Handler {
 
 	authHandlers := auth.NewHandlers(a.auth, a.cfg.CookieDomain, a.cfg.CookieSecure)
 	userHandlers := users.NewHandlers(a.pool, a.audit)
+	orgHandlers := orgs.NewHandlers(a.pool, a.audit, a.log)
 	rubricHandlers := rubrics.NewHandlers(a.rubrics, a.audit)
 	templateHandlers := templates.NewHandlers(a.templates, a.audit)
 	teamHandlers := teams.NewHandlers(a.teams, a.audit)
@@ -51,7 +53,7 @@ func newRouter(a *app) http.Handler {
 	submissionHandlers := submissions.NewHandlers(a.submissions, a.audit)
 	platformHandlers := platformcfg.NewHandlers(a.platform, a.ledger, a.audit)
 	profileHandlers := aiprofiles.NewHandlers(a.aiProfiles, a.audit)
-	reportHandlers := reports.New(a.pool, a.engine)
+	reportHandlers := reports.New(a.pool, a.engine, a.grading)
 	sessionHandlers := sessions.New(a.pool, a.engine, a.harness, a.cfg.MediaServiceToken, a.cfg.MaxConcurrentLiveSessions)
 
 	// Credential endpoints get their own bucket. Everything else shares a
@@ -63,9 +65,11 @@ func newRouter(a *app) http.Handler {
 		r.Use(apiLimiter.LimitByIP)
 		r.Get("/media/session", sessionHandlers.Verify)
 		r.Post("/media/turn", sessionHandlers.Turn)
+		r.Post("/media/finish", sessionHandlers.Finish)
 		r.Post("/media/question", sessionHandlers.Question)
 
 		r.Route("/auth", func(r chi.Router) {
+			r.With(loginLimiter.LimitByIP).Post("/reset-password", authHandlers.ResetPassword)
 			r.With(loginLimiter.LimitByIP).Group(authHandlers.Routes)
 		})
 
@@ -73,10 +77,15 @@ func newRouter(a *app) http.Handler {
 			r.Use(a.auth.Authenticate)
 
 			r.Get("/me", authHandlers.Me)
+			r.With(authz.Require("organization.edit")).Get("/organization", orgHandlers.Get)
+			r.With(authz.Require("organization.edit")).Put("/organization", orgHandlers.Update)
+			r.With(authz.Require("platform.organization.manage")).Get("/admin/organizations", orgHandlers.List)
+			r.With(authz.Require("platform.organization.manage")).Post("/admin/organizations", orgHandlers.Create)
 			r.With(authz.RequireAny("session.join", "session.observe")).Get("/sessions/{sessionID}", sessionHandlers.Get)
 			r.With(authz.RequireAny("session.join", "session.moderate")).Post("/sessions/{sessionID}/end", sessionHandlers.End)
 
 			r.Route("/users", func(r chi.Router) {
+				r.With(authz.Require("user.edit")).Post("/{userID}/password-reset", authHandlers.IssuePasswordReset)
 				r.With(authz.RequireAny("user.create", "user.assign_role")).Get("/roles", userHandlers.Roles)
 				r.With(authz.Require("user.view")).Get("/", userHandlers.List)
 				r.With(authz.Require("user.create")).Post("/", userHandlers.Create)
@@ -102,12 +111,15 @@ func newRouter(a *app) http.Handler {
 			})
 
 			r.Route("/teams", func(r chi.Router) {
+				r.With(authz.Require("team.edit")).Put("/{teamID}", teamHandlers.Update)
 				r.With(authz.Require("team.view")).Get("/", teamHandlers.List)
 				r.With(authz.Require("team.view")).Get("/{teamID}", teamHandlers.Get)
 				r.With(authz.Require("team.create")).Post("/", teamHandlers.Create)
 			})
 
 			r.Route("/assessments", func(r chi.Router) {
+				r.With(authz.Require("knowledge.view")).Get("/{assessmentID}/resources", submissionHandlers.ListResources)
+				r.With(authz.Require("knowledge.upload")).Post("/{assessmentID}/resources", submissionHandlers.UploadResource)
 				r.With(authz.Require("assessment.view")).Get("/", assessmentHandlers.List)
 				r.With(authz.Require("assessment.view")).
 					Get("/{assessmentID}", assessmentHandlers.Get)
@@ -124,6 +136,7 @@ func newRouter(a *app) http.Handler {
 			// query to their own team when they lack the organisation-wide
 			// permission, so view_own cannot be used to read someone else's.
 			r.Route("/assignments", func(r chi.Router) {
+				r.With(authz.Require("assessment.grade")).Post("/{assignmentID}/report/regrade", reportHandlers.Regrade)
 				r.With(authz.RequireAny("report.view", "report.view_own")).Get("/{assignmentID}/report", reportHandlers.Get)
 				r.With(authz.Require("assessment.override_grade")).Patch("/{assignmentID}/report/scores", reportHandlers.Override)
 				r.With(authz.Require("report.publish")).Post("/{assignmentID}/report/publish", reportHandlers.Publish)

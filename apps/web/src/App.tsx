@@ -1,4 +1,4 @@
-import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
+import { BrowserRouter, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ApiError } from "./lib/api";
 import { AuthProvider, useAuth, useIsStaff } from "./lib/auth";
@@ -10,6 +10,9 @@ import { Assessments } from "./routes/Assessments";
 import { AssessmentDetail } from "./routes/AssessmentDetail";
 import { Teams } from "./routes/Teams";
 import { Templates } from "./routes/Templates";
+import { Rubrics } from "./routes/Rubrics";
+import { ResetPassword } from "./routes/ResetPassword";
+import { OrganizationSettings, Organizations } from "./routes/Organizations";
 import { SessionRoom } from "./routes/SessionRoom";
 import { ModelSettings } from "./routes/ModelSettings";
 import { AiProfiles } from "./routes/AiProfiles";
@@ -46,6 +49,8 @@ export function App() {
 
 function Router() {
   const { status } = useAuth();
+  const location = useLocation();
+  if (location.pathname === "/reset-password") return <ResetPassword />;
 
   if (status === "loading") {
     return (
@@ -77,9 +82,12 @@ function Router() {
         <Route path="/assessments/:assessmentId" element={<AssessmentDetail />} />
         <Route path="/teams" element={<Teams />} />
         <Route path="/templates" element={<Templates />} />
+        <Route path="/rubrics" element={<Rubrics />} />
         <Route path="/admin/actors" element={<AiProfiles />} />
         <Route path="/admin/models" element={<ModelSettings />} />
         <Route path="/admin/users" element={<People />} />
+        <Route path="/admin/organization" element={<OrganizationSettings />} />
+        <Route path="/admin/organizations" element={<Organizations />} />
         <Route path="*" element={<NotFound />} />
       </Route>
     </Routes>

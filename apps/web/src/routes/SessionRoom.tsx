@@ -127,6 +127,7 @@ export function SessionRoom() {
         if (event.type === "transcript_partial") setPartial(event.text);
         if (event.type === "transcript_final") { setPartial(event.text); setState("Examiner considering"); }
         if (event.type === "saved") { setPartial(""); setState("Listening"); void session.refetch(); }
+        if (event.type === "drained") { finishing.current = true; stream.current?.getTracks().forEach((track) => track.stop()); setState("Speech saved"); void session.refetch(); }
         if (event.type === "question") { setQuestion(event.text); setPartial(""); void session.refetch(); }
         if (event.type === "error" || event.type === "warning") setError(new Error(event.message));
       };

@@ -59,6 +59,7 @@ func newRouter(a *app) http.Handler {
 	// Credential endpoints get their own bucket. Everything else shares a
 	// looser one; per-tenant quotas arrive with usage accounting.
 	loginLimiter := httpx.NewRateLimiter(20, 5)
+	resetLimiter := httpx.NewRateLimiter(10, 2)
 	apiLimiter := httpx.NewRateLimiter(600, 120)
 
 	r.Route("/api/v1", func(r chi.Router) {
@@ -69,7 +70,7 @@ func newRouter(a *app) http.Handler {
 		r.Post("/media/question", sessionHandlers.Question)
 
 		r.Route("/auth", func(r chi.Router) {
-			r.With(loginLimiter.LimitByIP).Post("/reset-password", authHandlers.ResetPassword)
+			r.With(resetLimiter.LimitByIP).Post("/reset-password", authHandlers.ResetPassword)
 			r.With(loginLimiter.LimitByIP).Group(authHandlers.Routes)
 		})
 

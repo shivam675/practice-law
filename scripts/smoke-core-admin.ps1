@@ -82,6 +82,8 @@ $newPassword='Smoke-new-'+[guid]::NewGuid().ToString('N')
 Call POST '/auth/reset-password' @{} @{token=$token;password=$newPassword}|Out-Null
 Denied 401 'Password reset revokes the old access session' {Call GET '/me' $other}
 Denied 400 'Reset link works once' {Call POST '/auth/reset-password' @{} @{token=$token;password=$newPassword}}
+# The production login bucket starts with five tokens; this smoke performs a sixth login.
+Start-Sleep -Seconds 4
 $afterReset=Login $two.email $newPassword
 Check ((Call GET '/me' $afterReset).user.id -eq $two.id) 'New password signs in after reset'
 Write-Output "PASS: core administration HTTP smoke. Isolated test tenant retained: $($organization.slug)"

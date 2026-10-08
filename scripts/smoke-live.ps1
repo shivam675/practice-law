@@ -22,10 +22,10 @@ $team=Call POST '/teams' $admin @{name="End-to-end $suffix";members=@(@{user_id=
 $rubric=Call POST '/rubrics' $admin @{key="e2e_$suffix";name='Development reasoning check';criteria=@(@{key='reasoning';name='Reasoning';description='Clear reasoning supported by the supplied record';weight=100;max_score=10;scope=@('written','oral');guidance='Use a verbatim quote as evidence.'})}
 $template=Call POST '/templates' $admin @{key="e2e_$suffix";name='Development full assessment';assessment_type='moot_court'}
 $version=Call POST "/templates/$($template.id)/versions" $admin @{
- rubric_id=$rubric.id; participation=@{sides=@('applicant');speakers=1;min_team_size=1;max_team_size=1;ai_actors=@()}
+ rubric_id=$rubric.id; participation=@{sides=@('applicant');speakers=1;min_team_size=1;max_team_size=1;ai_actors=@(@{profile_key='presiding_judge';role='judge';display_name='Presiding Judge';presiding=$true})}
  stages=@(
  @{id='written';kind='artifact_submission';label='Written response';due_after_s=900;config=@{formats=@('txt');max_bytes=100000;lock_on_submit=$true}},
- @{id='oral';kind='live_turn';label='Oral response';config=@{duration_s=600;speaker_order=1;interruptions='enabled'}},
+ @{id='oral';kind='live_turn';label='Oral response';config=@{duration_s=600;speaker_order=1;interruptions='enabled';ai_profiles=@('presiding_judge')}},
  @{id='evaluation';kind='automated_evaluation';label='Evaluation';config=@{rubric_scope=@('reasoning');sources=@('written','oral')}},
  @{id='review';kind='human_review';label='Teacher review';config=@{required=$true;overrides_allowed=$true}}
  )
@@ -72,6 +72,7 @@ $question=Call POST '/media/question' $ticket
 $watch.Stop()
 $live=Call GET "/sessions/$($joined.id)" $student
 Check ([bool]$question.question -or @($live.transcript | Where-Object speaker -eq 'Examiner').Count -gt 0) 'Configured judge returned a question'
+Check (@($live.transcript | Where-Object speaker -eq 'Presiding Judge').Count -gt 0) 'Configured AI profile supplied the judge question'
 Check ($watch.Elapsed.TotalSeconds -lt 5) "Question path bounded: $($watch.Elapsed.TotalSeconds.ToString('F2')) seconds"
 Denied 404 {Call GET "/sessions/$($joined.id)" $other}
 $hidden=Call GET "/assignments/$($assignment.id)/report" $student

@@ -1,5 +1,13 @@
 class Capture extends AudioWorkletProcessor {
-  constructor() { super(); this.samples = []; }
+  constructor() {
+    super(); this.samples = [];
+    this.port.onmessage = ({ data }) => {
+      if (data === "finish") {
+        const pcm = Int16Array.from(this.samples.splice(0));
+        this.port.postMessage({ type: "finish", audio: pcm.buffer }, [pcm.buffer]);
+      }
+    };
+  }
   process(inputs) {
     const channel = inputs[0]?.[0];
     if (channel) {

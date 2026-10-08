@@ -29,15 +29,32 @@ export function SessionRoom() {
   const context = useRef<AudioContext | null>(null);
   const socket = useRef<WebSocket | null>(null);
   const player = useRef<HTMLAudioElement | null>(null);
+  const captureNode = useRef<AudioWorkletNode | null>(null);
+  const playbackQueue = useRef<Blob[]>([]);
   const playbackUrl = useRef("");
   const finishing = useRef(false);
   const assignment = useQuery({queryKey: ["assignment", assignmentId], queryFn: () => api.get<Assignment>(`/assignments/${assignmentId}`), refetchInterval: observer ? 5000 : false});
   const session = useQuery({ queryKey: ["session", sessionId], queryFn: () => api.get<LiveSession>(`/sessions/${sessionId}`), enabled: !!sessionId, refetchInterval: 2000 });
 
   function stopPlayback() {
+    playbackQueue.current = [];
     player.current?.pause(); player.current = null;
     if (playbackUrl.current) URL.revokeObjectURL(playbackUrl.current);
     playbackUrl.current = "";
+  }
+  function playNext() {
+    if (player.current) return;
+    const next = playbackQueue.current.shift();
+    if (!next) { setState("Listening"); return; }
+    playbackUrl.current = URL.createObjectURL(next);
+    const sound = new Audio(playbackUrl.current); player.current = sound;
+    setState("Examiner speaking");
+    const done = () => {
+      if (player.current !== sound) return;
+      player.current = null; URL.revokeObjectURL(playbackUrl.current); playbackUrl.current = ""; playNext();
+    };
+    sound.onended = done;
+    void sound.play().catch(() => { done(); setError(new Error("Audio playback was blocked. Read the question on screen.")); });
   }
   function disconnect() {
     const ws = socket.current; socket.current = null; ws?.close();
@@ -61,7 +78,16 @@ export function SessionRoom() {
       await audio.audioWorklet.addModule("/audio-capture.js");
       const source = audio.createMediaStreamSource(stream.current);
       const capture = new AudioWorkletNode(audio, "capture");
-      capture.port.onmessage = ({ data }: MessageEvent<ArrayBuffer>) => {
+      captureNode.current = capture;
+      capture.port.onmessage = ({ data }: MessageEvent<ArrayBuffer | { type: "finish"; audio: ArrayBuffer }>) => {
+        if (!(data instanceof ArrayBuffer)) {
+          finishing.current = true;
+          if (socket.current?.readyState === WebSocket.OPEN) {
+            if (data.audio.byteLength) socket.current.send(data.audio);
+            socket.current.send(JSON.stringify({ type: "finish" }));
+          }
+          return;
+        }
         const samples = new Int16Array(data);
         const peak = samples.reduce((max, value) => Math.max(max, Math.abs(value)), 0) / 32768;
         setLevel(peak);
@@ -92,10 +118,7 @@ export function SessionRoom() {
       ws.onerror = () => setError(new Error("Cannot reach the local speech service. Reconnect when it is available."));
       ws.onmessage = ({ data }) => {
         if (data instanceof Blob) {
-          stopPlayback(); playbackUrl.current = URL.createObjectURL(data);
-          const sound = new Audio(playbackUrl.current); player.current = sound;
-          setState("Examiner speaking"); sound.onended = () => { stopPlayback(); setState("Listening"); };
-          void sound.play().catch(() => { setState("Listening"); setError(new Error("Audio playback was blocked. Read the question on screen.")); });
+          playbackQueue.current.push(data); playNext();
           return;
         }
         const event = JSON.parse(data);
@@ -115,7 +138,7 @@ export function SessionRoom() {
     try {
       const ws = socket.current;
       if (ws?.readyState === WebSocket.OPEN) {
-        finishing.current = true; setState("Saving your final words");
+        setState("Saving your final words");
         await new Promise<void>((resolve, reject) => {
           const cleanup = () => { clearTimeout(timer); ws.removeEventListener("message", message); ws.removeEventListener("close", closed); };
           const message = (event: MessageEvent) => {
@@ -124,7 +147,8 @@ export function SessionRoom() {
           const closed = () => { cleanup(); reject(new Error("The connection closed before saving finished. Check your saved transcript before finishing.")); };
           const timer = window.setTimeout(() => { cleanup(); reject(new Error("Saving took too long. Check your saved transcript and try again.")); }, 120000);
           ws.addEventListener("message", message); ws.addEventListener("close", closed);
-          ws.send(JSON.stringify({ type: "finish" }));
+          if (captureNode.current) captureNode.current.port.postMessage("finish");
+          else ws.send(JSON.stringify({ type: "finish" }));
         });
       }
       await api.post(`/sessions/${sessionId}/end`); disconnect(); setState("Session ended"); await session.refetch();

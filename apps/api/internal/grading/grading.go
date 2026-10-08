@@ -34,7 +34,7 @@ import (
 // PromptVersion is stamped on every evaluation and every ledger row. Bump it
 // whenever the wording below changes, so a disputed grade is reproducible and
 // a prompt change can drive a targeted re-grade.
-const PromptVersion = "grade.criterion.v1"
+const PromptVersion = "grade.criterion.v2"
 
 // maxInlineChars is how much submission text goes into a prompt whole. Above
 // it, the criterion's own retrieval decides what the model sees; a memorial
@@ -200,10 +200,11 @@ func (s *Store) GradeSubmission(ctx context.Context, t Target) (result Result, r
 
 func (s *Store) gradeOne(ctx context.Context, t Target, sub submission,
 	c rubrics.Criterion, sourceText string) (*criterionResult, error) {
-
+	record, err := s.assessmentRecord(ctx, t, c, sourceText)
+	if err != nil { return nil, err }
 	blocks := []harness.Untrusted{{
 		Label: "assessment_record",
-		Text:  clip(sourceText, maxInlineChars),
+		Text:  record,
 	}}
 
 	// Case materials ground a claim about authority. They are teacher-supplied
@@ -214,7 +215,7 @@ func (s *Store) gradeOne(ctx context.Context, t Target, sub submission,
 	}
 
 	out := &criterionResult{maxScore: c.MaxScore}
-	err := s.harness.Structured(ctx, harness.Call{
+	err = s.harness.Structured(ctx, harness.Call{
 		Tier:           "grader",
 		Purpose:        "grade_criterion",
 		PromptVersion:  PromptVersion,

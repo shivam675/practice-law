@@ -5,9 +5,11 @@ import io
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from contextlib import asynccontextmanager
+from functools import lru_cache
 
 import httpx
 import jwt
@@ -24,9 +26,10 @@ TOKEN = os.environ["MEDIA_SERVICE_TOKEN"]
 API = os.environ.get("CONTROL_API_URL", "http://api:8080/api/v1")
 ORIGINS = os.environ.get("MEDIA_ORIGINS", "http://localhost:5173").split(",")
 CAPACITY = int(os.environ.get("MAX_CONCURRENT_LIVE_SESSIONS", "3"))
-END_SILENCE = float(os.environ.get("STT_END_SILENCE_SECONDS", "1.0"))
-PARTIAL_INTERVAL = float(os.environ.get("STT_PARTIAL_INTERVAL_SECONDS", "0.7"))
-inference = asyncio.Lock()
+END_SILENCE = float(os.environ.get("STT_END_SILENCE_SECONDS", "0.65"))
+PARTIAL_INTERVAL = float(os.environ.get("STT_PARTIAL_INTERVAL_SECONDS", "2.5"))
+stt_lock = asyncio.Lock()
+tts_lock = asyncio.Lock()
 connections = set()
 whisper = None
 voice = None
@@ -38,6 +41,7 @@ def load_models():
     try:
         device = os.environ.get("STT_DEVICE", "cpu")
         whisper = WhisperModel(os.environ.get("STT_MODEL", "small.en"), device=device,
+                               cpu_threads=int(os.environ.get("STT_CPU_THREADS", "4")),
                                compute_type="float16" if device == "cuda" else "int8")
         voice = KPipeline(lang_code="a", device=os.environ.get("TTS_DEVICE", "cpu"))
     except Exception:
@@ -61,11 +65,17 @@ def health():
 
 
 def transcribe(audio):
-    segments, _ = whisper.transcribe(audio, language="en", beam_size=1,
-                                    condition_on_previous_text=False, vad_filter=True)
-    return " ".join(segment.text.strip() for segment in segments).strip()
+    started = time.monotonic()
+    # Endpointing already applied VAD. A second pass can remove quiet words.
+    segments, _ = whisper.transcribe(audio, language="en", beam_size=3,
+                                    condition_on_previous_text=False, vad_filter=False,
+                                    initial_prompt=os.environ.get("STT_GLOSSARY") or None)
+    text = " ".join(segment.text.strip() for segment in segments).strip()
+    log.info("stt audio_s=%.2f inference_s=%.2f", len(audio) / RATE, time.monotonic() - started)
+    return text
 
 
+@lru_cache(maxsize=64)
 def speak(text):
     chunks = [audio.numpy() for _, _, audio in voice(text, voice=os.environ.get("TTS_VOICE", "af_heart")) if audio is not None]
     if not chunks:
@@ -76,9 +86,8 @@ def speak(text):
 
 
 async def infer(function, value):
-    # ponytail: one inference call at a time on the development host.
-    # Replace with a bounded worker pool when measured load requires it.
-    async with inference:
+    # Each model is serialized; generating a voice never locks transcription.
+    async with (stt_lock if function is transcribe else tts_lock):
         task = asyncio.create_task(asyncio.to_thread(function, value))
         try:
             return await asyncio.shield(task)
@@ -98,7 +107,8 @@ async def judge(ws, client):
         if question:
             await ws.send_json({"type": "question", "text": question})
             try:
-                await ws.send_bytes(await infer(speak, question))
+                for sentence in re.split(r"(?<=[.!?])\s+", question):
+                    await ws.send_bytes(await infer(speak, sentence))
             except Exception:
                 log.exception("synthesize question")
                 await ws.send_json({"type": "warning", "message": "Voice is unavailable. Read the question on screen."})
@@ -144,20 +154,20 @@ async def process_audio(ws, client, queue, claims):
                 voiced = await asyncio.to_thread(get_speech_timestamps, audio[-RATE // 2:], VadOptions(min_speech_duration_ms=100))
                 if voiced:
                     if not active:
-                        if judge_task and not judge_task.done():
+                        if judge_task and not judge_task.done() and not judge_task.cancelling():
+                            # Cancellation waits for the model thread in infer();
+                            # do not stall incoming audio while it unwinds.
                             judge_task.cancel()
-                            with contextlib.suppress(asyncio.CancelledError):
-                                await judge_task
                         await ws.send_json({"type": "speech_started"})
                     active = True
                     silence_samples = 0
                 elif active:
                     silence_samples += len(block)
             # Endpointing follows audio time, so slow inference cannot invent silence.
-            final = active and (finishing or silence_samples >= RATE * END_SILENCE or len(audio) >= RATE * 25)
+            final = (active and (finishing or silence_samples >= RATE * END_SILENCE or len(audio) >= RATE * 25)) or (finishing and len(audio) >= RATE // 10 and np.max(np.abs(audio)) > 0.005)
             partial = active and queue.empty() and time.monotonic() - partial_at >= PARTIAL_INTERVAL
             if final or partial:
-                text = await infer(transcribe, audio if final else audio[-RATE * 15:])
+                text = await infer(transcribe, audio)
                 partial_at = time.monotonic()
                 if text:
                     await ws.send_json({"type": "transcript_final" if final else "transcript_partial", "text": text})
@@ -186,7 +196,8 @@ async def process_audio(ws, client, queue, claims):
                 audio = audio[-RATE // 2:]
     finally:
         if judge_task and not judge_task.done():
-            judge_task.cancel()
+            if not judge_task.cancelling():
+                judge_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await judge_task
 

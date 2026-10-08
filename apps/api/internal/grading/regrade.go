@@ -123,7 +123,7 @@ func (s *Store) Regrade(ctx context.Context, org, assignment, scoreID, actor uui
 	if err != nil {
 		return err
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO audit_logs(organization_id,actor_user_id,actor_kind,action,target_kind,target_id,reason,before_state,after_state) VALUES($1,$2,'user','assessment.regrade','evaluation',$3,$4,jsonb_build_object('evaluation_id',$5::text),jsonb_build_object('evaluation_id',$3::text,'criterion_id',$6::text))`, org, actor, next, strings.TrimSpace(reason), prior, criterion)
+	_, err = tx.Exec(ctx, `INSERT INTO audit_logs(organization_id,actor_user_id,actor_kind,action,target_kind,target_id,reason,before_state,after_state) VALUES($1,$2,'user','assessment.regrade','evaluation',$3::uuid,$4,jsonb_build_object('evaluation_id',($5::uuid)::text),jsonb_build_object('evaluation_id',($3::uuid)::text,'criterion_id',($6::uuid)::text))`, org, actor, next, strings.TrimSpace(reason), prior, criterion)
 	if err != nil {
 		return err
 	}

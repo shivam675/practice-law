@@ -36,3 +36,4 @@ recordings/
 .DS_Store
 coverage.out
 *.log
+legal_data/*

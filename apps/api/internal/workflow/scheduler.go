@@ -9,11 +9,10 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/intelimek/megamoot/apps/api/internal/httpx"
+	"github.com/slmlabs/megamoot/apps/api/internal/httpx"
 )
 
-// Scheduler executes durable timers: submission deadlines, grace expiry,
-// session join windows.
+// Scheduler executes durable timers and post-transition follow-up work.
 //
 // Claiming uses FOR UPDATE SKIP LOCKED, so several API replicas can run this
 // concurrently without any of them doing the same work twice.
@@ -74,15 +73,112 @@ type dueTransition struct {
 }
 
 func (s *Scheduler) tick(ctx context.Context) (int, error) {
-	due, err := s.claim(ctx)
+	followups, err := s.claimFollowups(ctx)
 	if err != nil {
 		return 0, err
+	}
+	for _, f := range followups {
+		s.executeFollowup(ctx, f)
+	}
+
+	due, err := s.claim(ctx)
+	if err != nil {
+		return len(followups), err
 	}
 
 	for _, t := range due {
 		s.execute(ctx, t)
 	}
-	return len(due), nil
+	return len(followups) + len(due), nil
+}
+
+type followup struct {
+	ID             uuid.UUID
+	OrganizationID uuid.UUID
+	Subject        Subject
+	SubjectID      uuid.UUID
+	From           string
+	To             string
+	Cause          string
+	Reason         string
+	Actor          Actor
+	Attempts       int
+}
+
+func (s *Scheduler) claimFollowups(ctx context.Context) ([]followup, error) {
+	rows, err := s.engine.pool.Query(ctx, `
+		WITH due AS (
+			SELECT id FROM workflow_followups
+			WHERE (status = 'pending' AND run_at <= now())
+			   OR (status = 'running' AND locked_at < now() - interval '5 minutes')
+			ORDER BY run_at
+			FOR UPDATE SKIP LOCKED
+			LIMIT $1
+		)
+		UPDATE workflow_followups f
+		SET status = 'running', attempts = f.attempts + 1,
+		    locked_by = $2, locked_at = now()
+		FROM due
+		WHERE f.id = due.id
+		RETURNING f.id, f.organization_id, f.subject_kind, f.subject_id,
+		          f.from_state, f.target_state, f.cause, f.reason,
+		          f.actor_kind, f.actor_user_id, f.attempts`, s.batch, s.nodeID)
+	if err != nil {
+		return nil, fmt.Errorf("claim workflow follow-ups: %w", err)
+	}
+	defer rows.Close()
+
+	var out []followup
+	for rows.Next() {
+		var f followup
+		if err := rows.Scan(&f.ID, &f.OrganizationID, &f.Subject, &f.SubjectID,
+			&f.From, &f.To, &f.Cause, &f.Reason, &f.Actor.Kind,
+			&f.Actor.UserID, &f.Attempts); err != nil {
+			return nil, fmt.Errorf("scan workflow follow-up: %w", err)
+		}
+		out = append(out, f)
+	}
+	return out, rows.Err()
+}
+
+func (s *Scheduler) executeFollowup(ctx context.Context, f followup) {
+	if s.engine.hook == nil {
+		s.finishFollowup(ctx, f.ID)
+		return
+	}
+
+	req := Request{Subject: f.Subject, SubjectID: f.SubjectID,
+		OrganizationID: f.OrganizationID, To: f.To, Cause: f.Cause,
+		Reason: f.Reason, Actor: f.Actor}
+	if err := s.engine.hook(ctx, req, f.From); err != nil {
+		s.retryFollowup(ctx, f, err)
+		s.log.Warn("workflow follow-up failed, will retry", "followup_id", f.ID,
+			"subject", f.Subject, "subject_id", f.SubjectID,
+			"attempts", f.Attempts, "error", err)
+		return
+	}
+	s.finishFollowup(ctx, f.ID)
+}
+
+func (s *Scheduler) finishFollowup(ctx context.Context, id uuid.UUID) {
+	ctx = context.WithoutCancel(ctx)
+	if _, err := s.engine.pool.Exec(ctx, `
+		UPDATE workflow_followups
+		SET status = 'done', last_error = NULL, locked_by = NULL, locked_at = NULL
+		WHERE id = $1`, id); err != nil {
+		s.log.Error("record workflow follow-up outcome", "followup_id", id, "error", err)
+	}
+}
+
+func (s *Scheduler) retryFollowup(ctx context.Context, f followup, cause error) {
+	ctx = context.WithoutCancel(ctx)
+	if _, err := s.engine.pool.Exec(ctx, `
+		UPDATE workflow_followups
+		SET status = 'pending', run_at = now() + $2::interval,
+		    last_error = $3, locked_by = NULL, locked_at = NULL
+		WHERE id = $1`, f.ID, retryDelay(f.Attempts).String(), cause.Error()); err != nil {
+		s.log.Error("reschedule workflow follow-up", "followup_id", f.ID, "error", err)
+	}
 }
 
 // claim atomically moves a batch of due rows to 'running' and returns them.
@@ -175,18 +271,22 @@ func (s *Scheduler) finish(ctx context.Context, id uuid.UUID, status, reason str
 
 // retry pushes the row back to pending with exponential backoff.
 func (s *Scheduler) retry(ctx context.Context, t dueTransition, cause error) {
-	backoff := time.Duration(1<<t.Attempts) * 10 * time.Second
-	if backoff > 10*time.Minute {
-		backoff = 10 * time.Minute
-	}
 	ctx = context.WithoutCancel(ctx)
 	if _, err := s.engine.pool.Exec(ctx, `
 		UPDATE scheduled_transitions
 		SET status = 'pending', run_at = now() + $2::interval,
 		    last_error = $3, locked_by = NULL, locked_at = NULL
-		WHERE id = $1`, t.ID, backoff.String(), cause.Error()); err != nil {
+		WHERE id = $1`, t.ID, retryDelay(t.Attempts).String(), cause.Error()); err != nil {
 		s.log.Error("reschedule failed transition", "transition_id", t.ID, "error", err)
 	}
+}
+
+func retryDelay(attempt int) time.Duration {
+	delay := time.Duration(1<<min(attempt, 6)) * 10 * time.Second
+	if delay > 10*time.Minute {
+		return 10 * time.Minute
+	}
+	return delay
 }
 
 // ReleaseStale returns rows abandoned by a crashed node to the queue. Without

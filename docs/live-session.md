@@ -1,129 +1,104 @@
 # Live session
 
-## Latency budget
+## Judging style
 
-Target: student stops speaking to judge audio starts, **1200 ms**.
+Choose a style for each live stage in the template editor. Assessments use the selected template version.
+Existing stages without `judging_style` use `balanced`.
 
-| Step | Budget | Note |
+| Style | During speech | At a natural pause |
 |---|---|---|
-| Client capture and encode | 20-40 ms | 20 ms frames, PCM16 16 kHz mono |
-| Network uplink | 20-60 ms | |
-| Server VAD endpoint decision | 200-300 ms | dominant fixed cost, tunable |
-| STT finalise tail | 100-200 ms | partials already streaming |
-| Monitor-tier decision | 120-250 ms | Qwen3-4B, short prompt, structured out |
-| Coordinator arbitration | under 5 ms | deterministic code, no model |
-| Question selection, bank hit | 20 ms | pgvector nearest neighbour |
-| Question selection, live LLM | 700-1500 ms | fallback path only |
-| TTS first chunk | 200-400 ms | Kokoro, sentence-chunked |
-| Downlink and jitter buffer | 60-100 ms | |
+| Balanced | Intervene for sustained topic drift or a clear contradiction, with priority at least 0.85 | Address a material weakness or unanswered question |
+| Strict | Also challenge unsupported or unclear material claims, with priority at least 0.85 | Address a material weakness or unanswered question |
+| Patient | Wait | Address a material weakness or unanswered question |
 
-Bank path lands near **800 ms** and feels like a judge. The live-LLM path lands
-near **2000 ms** and feels like a lagging video call. The bank must serve the
-majority of interruptions; the LLM is the fallback, not the hot path.
-
-## Transport
-
-WebSocket, not WebRTC, for V1.
-
-- Audio up: binary frames, PCM16 16 kHz mono, 20 ms, with a 4-byte sequence
-  header.
-- Audio down: binary Opus or PCM chunks from TTS.
-- Control down: JSON (transcript partials, judge state, timers, animation
-  cues).
-
-WebRTC buys packet-loss resilience and roughly 100-200 ms on bad networks, and
-costs ICE, STUN, TURN, an SFU and permanent operational overhead. Transport
-sits behind a `MediaTransport` interface so LiveKit can slot in at V3.
+The interruption setting remains independent. `disabled` prevents all questions. `limited` permits at most two questions per session.
+Profile cooldowns, quotas, and minimum priorities still apply. Eligible presiding judges receive first priority.
 
 ## Pipeline
 
-```
-mic -> client VAD (gate only, never trusted)
-    -> WS binary frames
-    -> server VAD (Silero, authoritative)
-    -> streaming STT (faster-whisper small.en, LocalAgreement-2)
-    -> partials straight back to the browser
-    -> finals to the session actor (Go) and to the monitor tier
-    -> assertion ledger update
-    -> monitor tier bid
-    -> coordinator arbitration (deterministic)
-    -> session actor grants the speaking floor
-    -> question: bank retrieval, else judge LLM
-    -> TTS sentence-chunked streaming
-    -> browser playback plus avatar state change
-```
+1. The browser sends PCM16 audio at 16 kHz over a WebSocket.
+2. Server VAD detects speech and pauses. Whisper produces partial text and final segments.
+3. A natural pause ends the turn. Continuous speech splits after eight seconds at a recognized word boundary.
+4. Final segments are saved before the judge runs. Continuous segments use `speaking=true`.
+5. The monitor reads case materials, the candidate memorial, recent conversation, and a rolling summary.
+6. It decides whether to continue, record a note, or propose an intervention.
+7. Code checks the style, priority, cooldown, quota, and an exact quote from the latest speech.
+8. A bank question must match the speech and receive monitor approval. Otherwise, the judge generates one grounded question.
+9. The media service sends the question and sentence audio. The browser acknowledges completed playback.
+10. The candidate receives the speaking floor again.
 
-## Tiered interruption engine
+Calls use the configured model bindings and timeouts. Only an approved intervention invokes question generation.
+A successful decision prevents repeated evaluation of the same final segment.
 
-**Tier 0 — deterministic, no model, free.**
-Silence over 900 ms. Turn over 90 s. Stage time budget crossed. Judge idle over
-N minutes. Speaker handoff reached.
+## Grounding and memory
 
-**Tier 1 — monitor, Qwen3-4B, runs on every final segment.**
-Short prompt: last 3 segments plus the open assertion ledger. Structured output
-only:
+Student text and source materials reach models in tagged user messages. They do not become system instructions.
+Recent conversation is bounded to 24 events and 16,000 characters. A rolling summary preserves earlier claims, authorities, concessions, and unanswered questions.
+Summary events are saved as `judge_memory`. They survive reconnects but do not appear as spoken transcript turns.
+Case context has a 12,000-character budget.
 
-```json
-{
-  "action": "interrupt | continue | note",
-  "priority": 0.82,
-  "reason": "unsupported legal proposition",
-  "claim_ref": "a_17",
-  "seed": "authority for the proportionality standard"
-}
-```
+An intervention must quote the latest speech exactly. Generated output must contain one question of at most 30 words and an exact speech quote.
+These checks reject fabricated quotes and malformed output. They do not prove the model's legal interpretation is correct.
 
-**Tier 2 — judge, runs only on an approved interrupt.**
-Bank retrieval against `seed` plus the current claim embedding. On a miss or a
-low similarity score, Qwen3-8B generates, grounded in retrieved chunks.
+Speech can save during inference. A newer final segment causes the old intervention to be discarded.
+Approved and dropped decisions are recorded in `judge_actions` when a profile exists. Model failures enter `ai_requests` and API logs.
 
-Roughly 15-25 judge turns per 12-minute speech. A continuous LLM loop would be
-100x the cost for worse latency.
+## Audio handoff
 
-## Coordinator
+The `question` event gives the judge the speaking floor before synthesis starts.
+Browser and server microphone frames become silence during playback. This prevents judge audio from becoming candidate speech.
+`judge_audio_end` marks completed synthesis. The browser waits for its audio queue to finish before sending `playback_done`.
+The server releases a missing acknowledgement after 30 seconds of incoming audio.
+Students wait for the judge to finish. Headphones and browser echo cancellation remain recommended.
 
-Deterministic code, never a model. Judges submit bids; the coordinator applies:
-
-1. Is the speaking floor free?
-2. Has this judge's cooldown elapsed?
-3. Does the current stage permit interruption?
-4. Is `priority` above the profile threshold?
-5. Does the judge have interruption quota left?
-6. Is the candidate mid-sentence according to VAD?
-
-The highest surviving bid wins. Everything else is dropped and logged to
-`judge_actions` with a reason. Three judges never talk over each other because
-the floor is a mutex, not a prompt instruction.
-
-## Barge-in and echo
-
-The most underestimated part of the system.
-
-- **Headphones are mandatory**, enforced in the device check. Without them the
-  judge transcribes its own voice. This is a hard product rule.
-- `echoCancellation: true`, `noiseSuppression: true` on `getUserMedia`.
-- Server-side gate: STT input is suppressed during TTS playback unless input
-  energy clears a threshold for over 300 ms.
-- On barge-in: cancel TTS immediately, flush the playback buffer, emit
-  `judge_interrupted_by_candidate`, release the floor.
-
-## Reliability
+## Failure behaviour
 
 | Failure | Behaviour |
 |---|---|
-| Browser refresh | Reconnect with `last_seq`; server replays the event delta |
-| Network blip | Client ring-buffers the last 10 s of audio and replays unacked frames by sequence |
-| Mic disconnect | Session pauses, resume budget starts, moderator notified |
-| STT down | Session enters `DEGRADED`; judge falls back to time-based bank questions; gap recorded in the report |
-| TTS down | Question renders as on-screen text; student answers normally |
-| LLM timeout over 2.5 s | Bank question used. A question is always available |
-| One judge agent fails | Remaining judges continue; the report notes the missing evaluation |
-| Session actor crashes | State rebuilt by replaying `session_events` |
-| Postgres restart | Media plane buffers events in Redis and flushes on recovery |
+| Monitor or judge error | Remain silent. Show a warning. Preserve saved speech. |
+| Missing parsed materials | Show a warning. Do not fabricate a case question. |
+| Invalid or ungrounded question | Reject the output. Show a warning. |
+| TTS failure or blocked playback | Keep the question on screen. Release the floor through playback completion handling. |
+| Reconnect | Reuse the session and read its saved transcript and memory. |
+| Slow connection or failed transcription | Preserve saved turns. Show an error and allow reconnection. |
 
-## Admission control
+Live model failures do not trigger generic fallback questions.
 
-`MAX_CONCURRENT_LIVE_SESSIONS` is a hard gate backed by `session_slots`. A 16 GB
-GPU supports roughly 3-5 concurrent sessions with Whisper small, Kokoro and two
-resident LLMs. Session 6 would degrade all five, so it queues instead. Students
-see a waiting-room position, not a broken session.
+## Local model setup
+
+Use a non-thinking model for live tiers. The tag `qwen3:4b` can contain Thinking-only weights.
+Check `/api/show`. Thinking-only weights cannot satisfy short deadlines by setting `reasoning_effort=none`.
+
+```powershell
+ollama pull qwen3:4b-instruct-2507-q4_K_M
+./scripts/prepare-live-model.ps1
+```
+
+The preparation script creates `qwen3-live` from installed weights and checks a JSON response. It refuses Thinking-only weights.
+Bind monitor and judge to that model in Model settings. Keep grading on its independently selected provider.
+With the API running, the existing routing script can update only the live tiers:
+
+```powershell
+./scripts/use-local-model.ps1 -Model qwen3-live -Tiers monitor,judge
+```
+
+Measure warm monitor, generation, and speech latency before a student pilot. A successful build does not establish conversational quality.
+
+## Verification
+
+```powershell
+# From apps/api, against an isolated database named judge_test:
+$env:JUDGE_TEST_DATABASE_URL='postgres://postgres:judge_test_only@localhost:55433/judge_test?sslmode=disable'
+go test ./internal/sessions -run TestLiveJudgePipeline -count=1 -v
+
+# Also evaluate the installed local model through the same database-backed path:
+$env:JUDGE_TEST_MODEL_URL='http://localhost:11434/v1'
+$env:JUDGE_TEST_MODEL='qwen3-live'
+go test ./internal/sessions -run TestLiveJudgePipeline -count=1 -v
+
+# From the repository root:
+docker compose run --rm --no-deps media python -m unittest test_speech -v
+```
+
+Database tests cover grounded redirection, continuation, style differences, fabricated quotes, provider failures, malformed questions, and stale decisions.
+Speech tests cover continuous monitoring, final-word preservation, audio handoff, and suppression of judge audio.

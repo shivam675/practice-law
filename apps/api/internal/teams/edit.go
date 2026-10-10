@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
-	"github.com/intelimek/megamoot/apps/api/internal/audit"
-	"github.com/intelimek/megamoot/apps/api/internal/auth"
-	"github.com/intelimek/megamoot/apps/api/internal/httpx"
 	"github.com/jackc/pgx/v5"
+	"github.com/slmlabs/megamoot/apps/api/internal/audit"
+	"github.com/slmlabs/megamoot/apps/api/internal/auth"
+	"github.com/slmlabs/megamoot/apps/api/internal/httpx"
 	"net/http"
 )
 

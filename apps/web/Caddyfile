@@ -1,0 +1,26 @@
+{$DOMAIN} {
+	@health path /healthz /readyz
+	handle @health {
+		reverse_proxy api:8080 {
+			header_up X-Forwarded-For {remote_host}
+		}
+	}
+
+	handle /api/* {
+		reverse_proxy api:8080 {
+			header_up X-Forwarded-For {remote_host}
+		}
+	}
+
+	handle /speech {
+		reverse_proxy media:8200 {
+			header_up X-Forwarded-For {remote_host}
+		}
+	}
+
+	handle {
+		root * /srv
+		try_files {path} /index.html
+		file_server
+	}
+}

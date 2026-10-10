@@ -22,9 +22,9 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/intelimek/megamoot/apps/api/internal/httpx"
-	"github.com/intelimek/megamoot/apps/api/internal/llm"
-	"github.com/intelimek/megamoot/apps/api/internal/secrets"
+	"github.com/slmlabs/megamoot/apps/api/internal/httpx"
+	"github.com/slmlabs/megamoot/apps/api/internal/llm"
+	"github.com/slmlabs/megamoot/apps/api/internal/secrets"
 )
 
 // Tiers is the closed set a binding may target. Adding one is a platform
@@ -53,7 +53,12 @@ type Binding struct {
 	TopP        float64   `json:"top_p"`
 	MaxTokens   int       `json:"max_tokens"`
 	TimeoutMS   int       `json:"timeout_ms"`
-	UpdatedAt   time.Time `json:"updated_at"`
+
+	// ReasoningEffort caps what a thinking model spends before it answers.
+	// Empty means the provider's own default.
+	ReasoningEffort string `json:"reasoning_effort"`
+
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 type Store struct {
@@ -264,7 +269,7 @@ func (s *Store) sealKey(key string) ([]byte, string, error) {
 func (s *Store) ListBindings(ctx context.Context) ([]Binding, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT b.tier, b.provider_id, p.key, b.model, b.temperature, b.top_p,
-		       b.max_tokens, b.timeout_ms, b.updated_at
+		       b.max_tokens, b.timeout_ms, b.reasoning_effort, b.updated_at
 		FROM model_bindings b
 		JOIN model_providers p ON p.id = b.provider_id
 		ORDER BY b.tier`)
@@ -277,7 +282,8 @@ func (s *Store) ListBindings(ctx context.Context) ([]Binding, error) {
 	for rows.Next() {
 		var b Binding
 		if err := rows.Scan(&b.Tier, &b.ProviderID, &b.ProviderKey, &b.Model,
-			&b.Temperature, &b.TopP, &b.MaxTokens, &b.TimeoutMS, &b.UpdatedAt); err != nil {
+			&b.Temperature, &b.TopP, &b.MaxTokens, &b.TimeoutMS,
+			&b.ReasoningEffort, &b.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan binding: %w", err)
 		}
 		out = append(out, b)
@@ -293,6 +299,8 @@ type BindingInput struct {
 	TopP        float64   `json:"top_p"`
 	MaxTokens   int       `json:"max_tokens"`
 	TimeoutMS   int       `json:"timeout_ms"`
+
+	ReasoningEffort string `json:"reasoning_effort"`
 }
 
 // Validate mirrors the CHECK constraints. The database is the second line;
@@ -324,6 +332,10 @@ func (in BindingInput) Validate() []string {
 	}
 	if in.TimeoutMS < 200 || in.TimeoutMS > 600000 {
 		problems = append(problems, where+": timeout_ms must be between 200 and 600000")
+	}
+	if !validReasoningEffort(in.ReasoningEffort) {
+		problems = append(problems, where+
+			": reasoning_effort must be empty, none, low, medium or high")
 	}
 	return problems
 }
@@ -364,8 +376,9 @@ func (s *Store) PutBindings(ctx context.Context, actorID uuid.UUID, in []Binding
 	for _, b := range in {
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO model_bindings
-				(tier, provider_id, model, temperature, top_p, max_tokens, timeout_ms, updated_by)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+				(tier, provider_id, model, temperature, top_p, max_tokens, timeout_ms,
+				 reasoning_effort, updated_by)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
 			ON CONFLICT (tier) DO UPDATE SET
 				provider_id = EXCLUDED.provider_id,
 				model       = EXCLUDED.model,
@@ -373,9 +386,11 @@ func (s *Store) PutBindings(ctx context.Context, actorID uuid.UUID, in []Binding
 				top_p       = EXCLUDED.top_p,
 				max_tokens  = EXCLUDED.max_tokens,
 				timeout_ms  = EXCLUDED.timeout_ms,
+				reasoning_effort = EXCLUDED.reasoning_effort,
 				updated_by  = EXCLUDED.updated_by`,
 			b.Tier, b.ProviderID, strings.TrimSpace(b.Model), b.Temperature,
-			b.TopP, b.MaxTokens, b.TimeoutMS, actorID); err != nil {
+			b.TopP, b.MaxTokens, b.TimeoutMS,
+			strings.TrimSpace(b.ReasoningEffort), actorID); err != nil {
 			if isForeignKeyViolation(err) {
 				return nil, httpx.ErrBadRequest("That provider does not exist.")
 			}
@@ -400,12 +415,12 @@ func (s *Store) Resolve(ctx context.Context, tier string) (llm.Provider, Binding
 	var b Binding
 	err := s.pool.QueryRow(ctx, `
 		SELECT b.tier, b.provider_id, p.key, b.model, b.temperature, b.top_p,
-		       b.max_tokens, b.timeout_ms, b.updated_at
+		       b.max_tokens, b.timeout_ms, b.reasoning_effort, b.updated_at
 		FROM model_bindings b
 		JOIN model_providers p ON p.id = b.provider_id
 		WHERE b.tier = $1`, tier).
 		Scan(&b.Tier, &b.ProviderID, &b.ProviderKey, &b.Model, &b.Temperature,
-			&b.TopP, &b.MaxTokens, &b.TimeoutMS, &b.UpdatedAt)
+			&b.TopP, &b.MaxTokens, &b.TimeoutMS, &b.ReasoningEffort, &b.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return llm.Provider{}, Binding{}, httpx.ErrBadRequest(
 			"No model is bound to the " + tier + " tier yet.")
@@ -426,6 +441,20 @@ func (s *Store) Resolve(ctx context.Context, tier string) (llm.Provider, Binding
 func validTier(tier string) bool {
 	for _, t := range Tiers {
 		if t == tier {
+			return true
+		}
+	}
+	return false
+}
+
+// ReasoningEfforts is the OpenAI-compatible set. Empty is the fifth option
+// and means "send nothing", which is not the same as "none": a provider that
+// has never heard of the field must not be handed one.
+var ReasoningEfforts = []string{"", "none", "low", "medium", "high"}
+
+func validReasoningEffort(effort string) bool {
+	for _, e := range ReasoningEfforts {
+		if e == strings.TrimSpace(effort) {
 			return true
 		}
 	}

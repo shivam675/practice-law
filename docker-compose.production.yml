@@ -1,0 +1,129 @@
+name: megamoot
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-megamoot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-megamoot}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks: [backend]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-megamoot} -d ${POSTGRES_DB:-megamoot}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "no", "--save", ""]
+    networks: [backend]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile
+      target: runtime
+    restart: unless-stopped
+    env_file: ${MEGAMOOT_ENV_FILE:-.env}
+    environment:
+      APP_ENV: production
+      POSTGRES_HOST: postgres
+      REDIS_URL: redis://redis:6379/0
+      AI_SERVICE_URL: http://ai:8100
+      MEDIA_SERVICE_URL: http://media:8200
+      API_PUBLIC_URL: https://${DOMAIN:?set DOMAIN}
+      WEB_PUBLIC_URL: https://${DOMAIN}
+      CORS_ALLOWED_ORIGINS: https://${DOMAIN}
+      COOKIE_DOMAIN: ${DOMAIN}
+      COOKIE_SECURE: "true"
+      MEDIA_PUBLIC_WS_URL: wss://${DOMAIN}/speech
+      BLOB_DRIVER: filesystem
+      BLOB_FS_ROOT: /var/lib/megamoot/blobs
+    volumes:
+      - blobdata:/var/lib/megamoot/blobs
+    networks: [backend, parsing]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      ai:
+        condition: service_started
+
+  ai:
+    build:
+      context: ./apps/ai
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      AI_SERVICE_TOKEN: ${AI_SERVICE_TOKEN:?set AI_SERVICE_TOKEN}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    networks: [parsing]
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m
+    mem_limit: 1g
+    pids_limit: 128
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+
+  media:
+    build: ./apps/media
+    restart: unless-stopped
+    environment:
+      MEDIA_SERVICE_TOKEN: ${MEDIA_SERVICE_TOKEN:?set MEDIA_SERVICE_TOKEN}
+      CONTROL_API_URL: http://api:8080/api/v1
+      MEDIA_ORIGINS: https://${DOMAIN}
+      STT_MODEL: ${STT_MODEL:-small.en}
+      STT_DEVICE: ${STT_DEVICE:-cpu}
+    volumes:
+      - speechmodels:/models
+    networks: [backend]
+    depends_on:
+      api:
+        condition: service_started
+
+  web:
+    build:
+      context: ./apps/web
+      dockerfile: Dockerfile
+      target: production
+    restart: unless-stopped
+    environment:
+      DOMAIN: ${DOMAIN}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - caddydata:/data
+      - caddyconfig:/config
+    networks: [backend]
+    depends_on:
+      api:
+        condition: service_started
+      media:
+        condition: service_started
+
+networks:
+  backend:
+  parsing:
+    internal: true
+
+volumes:
+  blobdata:
+  caddyconfig:
+  caddydata:
+  pgdata:
+  speechmodels:

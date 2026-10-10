@@ -22,8 +22,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/intelimek/megamoot/apps/api/internal/llm"
-	"github.com/intelimek/megamoot/apps/api/internal/platformcfg"
+	"github.com/slmlabs/megamoot/apps/api/internal/llm"
+	"github.com/slmlabs/megamoot/apps/api/internal/platformcfg"
 )
 
 // EmbeddingDim is the width of document_chunks.embedding and of every other
@@ -191,6 +191,8 @@ func (h *Harness) prepare(ctx context.Context, call Call) (*llm.Client, platform
 		TopP:        binding.TopP,
 		MaxTokens:   maxTokens,
 		Timeout:     timeout,
+
+		ReasoningEffort: binding.ReasoningEffort,
 	}, nil
 }
 

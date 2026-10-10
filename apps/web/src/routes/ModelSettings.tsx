@@ -3,10 +3,12 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { CheckCircle, Plus, Trash } from "@phosphor-icons/react";
 import {
   api,
+  reasoningEfforts,
   type ConnectionTest,
   type ModelBinding,
   type ModelProvider,
   type ModelTier,
+  type ReasoningEffort,
 } from "../lib/api";
 import { Button } from "../ui/Button";
 import { Field, TextInput } from "../ui/Field";
@@ -351,11 +353,29 @@ function ProviderForm({ provider, onDone }: { provider?: ModelProvider; onDone: 
 
 /* -------------------------------------------------------------------- routing */
 
-const defaults: Record<ModelTier, { temperature: number; max_tokens: number; timeout_ms: number }> = {
-  monitor: { temperature: 0.2, max_tokens: 256, timeout_ms: 2000 },
-  judge: { temperature: 0.4, max_tokens: 512, timeout_ms: 3000 },
-  grader: { temperature: 0.2, max_tokens: 2048, timeout_ms: 120000 },
-  embedding: { temperature: 0, max_tokens: 1, timeout_ms: 30000 },
+type TierDefaults = {
+  temperature: number;
+  max_tokens: number;
+  timeout_ms: number;
+  reasoning_effort: ReasoningEffort;
+};
+
+// max_tokens covers the thinking as well as the answer, so a tier that asks
+// for reasoning has to budget for it. The live tiers ask for none; the grader
+// is the one place where thinking is worth the seconds it costs.
+const defaults: Record<ModelTier, TierDefaults> = {
+  monitor: { temperature: 0.2, max_tokens: 600, timeout_ms: 3000, reasoning_effort: "none" },
+  judge: { temperature: 0.4, max_tokens: 512, timeout_ms: 3000, reasoning_effort: "none" },
+  grader: { temperature: 0.2, max_tokens: 8192, timeout_ms: 120000, reasoning_effort: "low" },
+  embedding: { temperature: 0, max_tokens: 1, timeout_ms: 30000, reasoning_effort: "" },
+};
+
+const reasoningLabels: Record<ReasoningEffort, string> = {
+  "": "Provider default",
+  none: "None - answer directly",
+  low: "Low",
+  medium: "Medium",
+  high: "High",
 };
 
 type Draft = {
@@ -366,6 +386,7 @@ type Draft = {
   top_p: number;
   max_tokens: number;
   timeout_ms: number;
+  reasoning_effort: ReasoningEffort;
 };
 
 function Routing({
@@ -384,7 +405,20 @@ function Routing({
   const [drafts, setDrafts] = useState<Draft[]>(() =>
     tiers.map((tier) => {
       const existing = bindings.find((b) => b.tier === tier);
-      if (existing) return { ...existing };
+      if (existing) {
+        // Projected field by field, not spread. A binding carries provider_key
+        // and updated_at, which the API reads back and refuses on the way in.
+        return {
+          tier,
+          provider_id: existing.provider_id,
+          model: existing.model,
+          temperature: existing.temperature,
+          top_p: existing.top_p,
+          max_tokens: existing.max_tokens,
+          timeout_ms: existing.timeout_ms,
+          reasoning_effort: existing.reasoning_effort ?? "",
+        };
+      }
       return {
         tier,
         provider_id: "",
@@ -556,6 +590,31 @@ function TierRow({
           max={600000}
           onChange={(v) => onChange({ timeout_ms: Math.round(v) })}
         />
+      </div>
+
+      <div className="mt-4 grid gap-4 md:grid-cols-2">
+        <Field
+          label="Thinking"
+          helper="A reasoning model spends max tokens on its thinking before it writes any answer. Lower this, or raise max tokens."
+        >
+          {({ id, describedBy }) => (
+            <select
+              id={id}
+              aria-describedby={describedBy}
+              className={selectClass}
+              value={draft.reasoning_effort}
+              onChange={(e) =>
+                onChange({ reasoning_effort: e.target.value as ReasoningEffort })
+              }
+            >
+              {reasoningEfforts.map((effort) => (
+                <option key={effort || "default"} value={effort}>
+                  {reasoningLabels[effort]}
+                </option>
+              ))}
+            </select>
+          )}
+        </Field>
       </div>
 
       {test.error ? <div className="mt-4"><ErrorState error={test.error} /></div> : null}

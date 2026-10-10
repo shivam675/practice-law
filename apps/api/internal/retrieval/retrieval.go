@@ -23,8 +23,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/intelimek/megamoot/apps/api/internal/harness"
-	"github.com/intelimek/megamoot/apps/api/internal/llm"
+	"github.com/slmlabs/megamoot/apps/api/internal/harness"
+	"github.com/slmlabs/megamoot/apps/api/internal/llm"
 )
 
 // embedBatch keeps one request under a provider's payload limit without

@@ -1,0 +1,110 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/api
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache-dependency-path: apps/api/go.sum
+      - name: Validate formatting
+        run: |
+          files="$(gofmt -l .)"
+          test -z "$files" || { echo "$files"; exit 1; }
+      - run: go vet ./...
+      - run: go test ./...
+
+  extraction:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: apps/ai/requirements.txt
+      - run: pip install -r apps/ai/requirements.txt pytest
+      - run: pytest -q apps/ai/tests
+
+  speech:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/media
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: apps/media/requirements.txt
+      - run: pip install torch --index-url https://download.pytorch.org/whl/cpu
+      - run: pip install -r requirements.txt
+      - run: python -m unittest test_speech -v
+        env:
+          MEDIA_SERVICE_TOKEN: ci_media_service_token_32_characters
+
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      - run: npm ci
+      - run: npm audit --audit-level=high
+      - run: npm run typecheck
+      - run: npm run build
+
+  staging-smoke:
+    if: github.ref == 'refs/heads/main'
+    needs: [go, extraction, speech, web]
+    runs-on: windows-latest
+    env:
+      STAGING_URL: ${{ secrets.STAGING_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure staging credentials
+        shell: pwsh
+        env:
+          SEED_ADMIN_EMAIL: ${{ secrets.STAGING_ADMIN_EMAIL }}
+          SEED_ADMIN_PASSWORD: ${{ secrets.STAGING_ADMIN_PASSWORD }}
+          SEED_SUPERADMIN_EMAIL: ${{ secrets.STAGING_SUPERADMIN_EMAIL }}
+          SEED_SUPERADMIN_PASSWORD: ${{ secrets.STAGING_SUPERADMIN_PASSWORD }}
+          SEED_DEMO_PASSWORD: ${{ secrets.STAGING_DEMO_PASSWORD }}
+        run: |
+          @"
+          SEED_ADMIN_EMAIL=$env:SEED_ADMIN_EMAIL
+          SEED_ADMIN_PASSWORD=$env:SEED_ADMIN_PASSWORD
+          SEED_SUPERADMIN_EMAIL=$env:SEED_SUPERADMIN_EMAIL
+          SEED_SUPERADMIN_PASSWORD=$env:SEED_SUPERADMIN_PASSWORD
+          SEED_DEMO_PASSWORD=$env:SEED_DEMO_PASSWORD
+          "@ | Set-Content .env
+      - name: Run staging smoke suite
+        shell: pwsh
+        run: |
+          ./scripts/smoke.ps1
+          ./scripts/smoke-workflow.ps1
+          ./scripts/smoke-submissions.ps1
+          ./scripts/smoke-models.ps1
+          ./scripts/smoke-core-admin.ps1
+          ./scripts/smoke-live.ps1

@@ -11,7 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/intelimek/megamoot/apps/api/internal/auth"
+	"github.com/slmlabs/megamoot/apps/api/internal/auth"
 )
 
 // DemoTeamName is the team the seeded students belong to. It matches the

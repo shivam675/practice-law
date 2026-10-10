@@ -6,8 +6,8 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/intelimek/megamoot/apps/api/internal/harness"
-	"github.com/intelimek/megamoot/apps/api/internal/rubrics"
+	"github.com/slmlabs/megamoot/apps/api/internal/harness"
+	"github.com/slmlabs/megamoot/apps/api/internal/rubrics"
 )
 
 func recordParts(text string, limit int) []string {

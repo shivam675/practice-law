@@ -37,3 +37,7 @@ recordings/
 coverage.out
 *.log
 legal_data/*
+# build artefacts
+apps/api/.air/
+*.tsbuildinfo
+.cache/*

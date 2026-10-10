@@ -270,6 +270,15 @@ func liveTurnWith(cfg LiveTurnConfig) []Stage {
 
 var mootKeys = []string{"legal_reasoning", "authorities", "advocacy"}
 
+func TestJudgingStyle(t *testing.T) {
+	for _, style := range []string{"", "balanced", "strict", "patient", "unknown"} {
+		err := ValidateStages(liveTurnWith(LiveTurnConfig{DurationS: 600, Interruptions: InterruptionsEnabled, JudgingStyle: style}), mootKeys)
+		if (err != nil) != (style == "unknown") {
+			t.Errorf("style %q: %v", style, err)
+		}
+	}
+}
+
 func TestExtensionsAreOptional(t *testing.T) {
 	err := ValidateStages(liveTurnWith(LiveTurnConfig{
 		DurationS: 720, Interruptions: InterruptionsEnabled,

@@ -15,7 +15,7 @@ const emptyVersion = (): AuthorVersion => ({ rubric_id: "", stages: [], particip
 const defaults: Record<StageKind, Record<string, unknown>> = {
  wait: { instructions: "", visible_resources: [] },
  artifact_submission: { formats: ["pdf", "docx", "txt"], max_bytes: 25 * 1024 * 1024, lock_on_submit: true },
- live_turn: { duration_s: 600, interruptions: "limited" },
+ live_turn: { duration_s: 600, interruptions: "limited", judging_style: "balanced" },
  automated_evaluation: { rubric_scope: [], sources: [] },
  human_review: { required: true, overrides_allowed: true },
 };
@@ -72,7 +72,7 @@ function StageConfig({ stage, onChange }: { stage: AuthorStage; onChange: (confi
  switch (stage.kind) {
  case "wait": return <>{text("instructions", "Instructions")}{list("visible_resources", "Visible material kinds")}</>;
  case "artifact_submission": return <>{text("instructions", "Instructions")}{list("formats", "Accepted formats")}{number("max_bytes", "Maximum file size (bytes)")}{bool("lock_on_submit", "Lock after submission")}{text("format_rules", "Format checker")}</>;
- case "live_turn": return <>{number("duration_s", "Duration (seconds)")}{number("speaker_order", "Speaker order (0 for any)")}<SelectField label="Interruptions" value={String(c.interruptions ?? "")} onChange={v => set("interruptions", v)}>{["enabled", "limited", "disabled"].map(v => <option key={v}>{v}</option>)}</SelectField>{list("warn_at_s", "Warnings before end (seconds)", true)}{number("extension_s", "Extension duration (seconds)")}{number("max_extensions", "Maximum extensions")}{list("ai_profiles", "Actor profile keys (empty for all)")}</>;
+ case "live_turn": return <>{number("duration_s", "Duration (seconds)")}{number("speaker_order", "Speaker order (0 for any)")}<SelectField label="Interruptions" value={String(c.interruptions ?? "")} onChange={v => set("interruptions", v)}>{["enabled", "limited", "disabled"].map(v => <option key={v}>{v}</option>)}</SelectField><SelectField label="Judging style" value={String(c.judging_style ?? "balanced")} onChange={v => set("judging_style", v)}><option value="balanced">Balanced: usually wait for a pause</option><option value="strict">Strict: challenge material weaknesses sooner</option><option value="patient">Patient: always wait for a pause</option></SelectField>{list("warn_at_s", "Warnings before end (seconds)", true)}{number("extension_s", "Extension duration (seconds)")}{number("max_extensions", "Maximum extensions")}{list("ai_profiles", "Actor profile keys (empty for all)")}</>;
  case "automated_evaluation": return <>{list("rubric_scope", "Criterion keys")}{list("sources", "Source stage keys (empty for all preceding)")}</>;
  case "human_review": return <>{bool("required", "Review required")}{bool("overrides_allowed", "Allow score overrides")}</>;
  }

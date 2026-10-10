@@ -91,6 +91,7 @@ type LiveTurnConfig struct {
 	// Which speaker in the team holds the floor; 0 means any member.
 	SpeakerOrder  int                `json:"speaker_order,omitempty"`
 	Interruptions InterruptionPolicy `json:"interruptions"`
+	JudgingStyle  string             `json:"judging_style,omitempty"`
 	// Warn the speaker this many seconds before time expires.
 	WarnAtS []int `json:"warn_at_s,omitempty"`
 
@@ -272,6 +273,11 @@ func validateConfig(where string, s Stage, knownCriteria, stageIDs map[string]st
 		}
 		if c.SpeakerOrder < 0 {
 			problems = append(problems, fmt.Sprintf("%s: speaker_order cannot be negative", where))
+		}
+		switch c.JudgingStyle {
+		case "", "balanced", "strict", "patient":
+		default:
+			problems = append(problems, fmt.Sprintf("%s: unknown judging style %q", where, c.JudgingStyle))
 		}
 		for _, warn := range c.WarnAtS {
 			if warn <= 0 || warn >= c.DurationS {

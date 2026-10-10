@@ -15,13 +15,12 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/intelimek/megamoot/apps/api/internal/config"
-	"github.com/intelimek/megamoot/apps/api/internal/db"
-	"github.com/intelimek/megamoot/apps/api/internal/orgs"
-	"github.com/intelimek/megamoot/apps/api/internal/seeddata"
-	"github.com/intelimek/megamoot/apps/api/migrations"
+	"github.com/slmlabs/megamoot/apps/api/internal/config"
+	"github.com/slmlabs/megamoot/apps/api/internal/db"
+	"github.com/slmlabs/megamoot/apps/api/internal/orgs"
+	"github.com/slmlabs/megamoot/apps/api/internal/seeddata"
+	"github.com/slmlabs/megamoot/apps/api/migrations"
 )
 
 func main() {
@@ -125,9 +124,17 @@ func newLogger(level string) *slog.Logger {
 	return slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: lvl}))
 }
 
+type readinessPinger interface {
+	Ping(context.Context) error
+}
+
+type readinessChecker interface {
+	Healthy(context.Context) error
+}
+
 // healthHandlers keeps readiness honest: /healthz means the process is up,
-// /readyz means it can actually serve, which requires the database.
-func healthHandlers(pool *pgxpool.Pool) (live, ready http.HandlerFunc) {
+// /readyz means the database and document extraction service are available.
+func healthHandlers(pool readinessPinger, ai readinessChecker) (live, ready http.HandlerFunc) {
 	live = func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
@@ -138,6 +145,11 @@ func healthHandlers(pool *pgxpool.Pool) (live, ready http.HandlerFunc) {
 		if err := pool.Ping(ctx); err != nil {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			_, _ = w.Write([]byte(`{"status":"degraded","reason":"database"}`))
+			return
+		}
+		if err := ai.Healthy(ctx); err != nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"status":"degraded","reason":"extraction"}`))
 			return
 		}
 		w.WriteHeader(http.StatusOK)

@@ -2,7 +2,8 @@ param([switch]$Speech, [switch]$Regrade)
 $ErrorActionPreference = 'Stop'
 $settings = @{}
 Get-Content (Join-Path $PSScriptRoot '..\.env') | ForEach-Object { if ($_ -match '^([A-Z0-9_]+)=(.*)$') { $settings[$Matches[1]] = $Matches[2].Trim() } }
-$base = 'http://localhost:8080/api/v1'
+$origin = if ($env:STAGING_URL) { $env:STAGING_URL.TrimEnd('/') } else { 'http://localhost:8080' }
+$base = "$origin/api/v1"
 function Call($method, $path, $auth, $body = $null) {
     $args = @{ Method=$method; Uri="$base$path"; Headers=$auth; ContentType='application/json' }
     if ($null -ne $body) { $args.Body = $body | ConvertTo-Json -Depth 15 }
@@ -71,8 +72,9 @@ $watch=[Diagnostics.Stopwatch]::StartNew()
 $question=Call POST '/media/question' $ticket
 $watch.Stop()
 $live=Call GET "/sessions/$($joined.id)" $student
-Check ([bool]$question.question -or @($live.transcript | Where-Object speaker -eq 'Examiner').Count -gt 0) 'Configured judge returned a question'
-Check (@($live.transcript | Where-Object speaker -eq 'Presiding Judge').Count -gt 0) 'Configured AI profile supplied the judge question'
+Check (-not $question.warning) 'Configured judge evaluated the speech without a model failure'
+if ($question.question) { Check ($question.speaker -eq 'Presiding Judge') 'Configured AI profile supplied the judge question' }
+else { Write-Output 'PASS: judge allowed the candidate to continue' }
 Check ($watch.Elapsed.TotalSeconds -lt 5) "Question path bounded: $($watch.Elapsed.TotalSeconds.ToString('F2')) seconds"
 Denied 404 {Call GET "/sessions/$($joined.id)" $other}
 $hidden=Call GET "/assignments/$($assignment.id)/report" $student

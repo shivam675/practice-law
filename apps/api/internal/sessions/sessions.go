@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -12,13 +13,13 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
-	"github.com/intelimek/megamoot/apps/api/internal/auth"
-	"github.com/intelimek/megamoot/apps/api/internal/harness"
-	"github.com/intelimek/megamoot/apps/api/internal/httpx"
-	"github.com/intelimek/megamoot/apps/api/internal/spec"
-	"github.com/intelimek/megamoot/apps/api/internal/workflow"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/slmlabs/megamoot/apps/api/internal/auth"
+	"github.com/slmlabs/megamoot/apps/api/internal/harness"
+	"github.com/slmlabs/megamoot/apps/api/internal/httpx"
+	"github.com/slmlabs/megamoot/apps/api/internal/spec"
+	"github.com/slmlabs/megamoot/apps/api/internal/workflow"
 )
 
 type Handlers struct {
@@ -38,6 +39,12 @@ type Claims struct {
 	OrgID     uuid.UUID `json:"organization_id"`
 	jwt.RegisteredClaims
 }
+
+const (
+	mediaTicketAudience  = "megamoot-media"
+	mediaSessionAudience = "megamoot-media-session"
+)
+
 type Session struct {
 	ID         uuid.UUID  `json:"id"`
 	Status     string     `json:"status"`
@@ -177,11 +184,26 @@ func (h *Handlers) Join(w http.ResponseWriter, r *http.Request) {
 		httpx.Fail(w, r, err)
 		return
 	}
+	clientIP, err := requestIP(r)
+	if err != nil {
+		httpx.Fail(w, r, err)
+		return
+	}
+	ticketID := uuid.New()
+	ticketExpires := time.Now().Add(30 * time.Second)
+	if _, err = tx.Exec(r.Context(), `
+		INSERT INTO speech_tickets
+			(id, organization_id, session_id, user_id, client_ip, expires_at)
+		VALUES ($1,$2,$3,$4,$5,$6)`, ticketID, p.OrganizationID, sessionID,
+		p.UserID, clientIP, ticketExpires); err != nil {
+		httpx.Fail(w, r, err)
+		return
+	}
 	if err = tx.Commit(r.Context()); err != nil {
 		httpx.Fail(w, r, err)
 		return
 	}
-	claims := Claims{SessionID: sessionID, OrgID: p.OrganizationID, RegisteredClaims: jwt.RegisteredClaims{Subject: p.UserID.String(), Audience: jwt.ClaimStrings{"megamoot-media"}, ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Duration(cfg.DurationS+300) * time.Second))}}
+	claims := Claims{SessionID: sessionID, OrgID: p.OrganizationID, RegisteredClaims: jwt.RegisteredClaims{ID: ticketID.String(), Subject: p.UserID.String(), Audience: jwt.ClaimStrings{mediaTicketAudience}, ExpiresAt: jwt.NewNumericDate(ticketExpires)}}
 	ticket, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(h.secret)
 	if err != nil {
 		httpx.Fail(w, r, err)
@@ -260,11 +282,19 @@ func (h *Handlers) End(w http.ResponseWriter, r *http.Request) {
 	}
 	h.respond(w, r, id, p.OrganizationID)
 }
-func (h *Handlers) claims(r *http.Request, draining bool) (*Claims, error) {
+func (h *Handlers) parseClaims(r *http.Request, audience string) (*Claims, error) {
 	c := &Claims{}
-	_, err := jwt.ParseWithClaims(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "), c, func(t *jwt.Token) (any, error) { return h.secret, nil }, jwt.WithValidMethods([]string{"HS256"}), jwt.WithAudience("megamoot-media"), jwt.WithExpirationRequired())
+	_, err := jwt.ParseWithClaims(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "), c, func(t *jwt.Token) (any, error) { return h.secret, nil }, jwt.WithValidMethods([]string{"HS256"}), jwt.WithAudience(audience), jwt.WithExpirationRequired())
 	if err != nil {
 		return nil, httpx.ErrUnauthorized()
+	}
+	return c, nil
+}
+
+func (h *Handlers) claims(r *http.Request, draining bool) (*Claims, error) {
+	c, err := h.parseClaims(r, mediaSessionAudience)
+	if err != nil {
+		return nil, err
 	}
 	var valid bool
 	err = h.pool.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM sessions s JOIN session_participants p ON p.session_id=s.id WHERE s.id=$1 AND s.organization_id=$2 AND p.user_id=$3 AND s.status='running' AND NOT EXISTS(SELECT 1 FROM scheduled_transitions t WHERE t.subject_id=s.id AND t.cause_key IN ('end','drain_end') AND t.run_at-CASE WHEN t.cause_key='drain_end' AND NOT $4 THEN interval '120 seconds' ELSE interval '0 seconds' END<=now()))`, c.SessionID, c.OrgID, c.Subject, draining).Scan(&valid)
@@ -277,12 +307,72 @@ func (h *Handlers) claims(r *http.Request, draining bool) (*Claims, error) {
 	return c, nil
 }
 func (h *Handlers) Verify(w http.ResponseWriter, r *http.Request) {
-	c, err := h.claims(r, false)
+	if subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Media-Service-Token")), h.secret) != 1 {
+		httpx.Fail(w, r, httpx.ErrUnauthorized())
+		return
+	}
+	c, err := h.parseClaims(r, mediaTicketAudience)
 	if err != nil {
 		httpx.Fail(w, r, err)
 		return
 	}
-	h.respond(w, r, c.SessionID, c.OrgID)
+	ticketID, err := uuid.Parse(c.ID)
+	if err != nil {
+		httpx.Fail(w, r, httpx.ErrUnauthorized())
+		return
+	}
+	clientIP := net.ParseIP(strings.TrimSpace(r.Header.Get("X-Speech-Client-IP")))
+	if clientIP == nil {
+		httpx.Fail(w, r, httpx.ErrUnauthorized())
+		return
+	}
+	var endsAt time.Time
+	err = h.pool.QueryRow(r.Context(), `
+		WITH consumed AS (
+			UPDATE speech_tickets SET consumed_at = now()
+			WHERE id=$1 AND organization_id=$2 AND session_id=$3
+			  AND user_id=$4 AND client_ip=$5 AND consumed_at IS NULL
+			  AND expires_at > now()
+			RETURNING session_id
+		)
+		SELECT t.run_at - CASE WHEN t.cause_key='drain_end'
+		       THEN interval '120 seconds' ELSE interval '0 seconds' END
+		FROM consumed c
+		JOIN scheduled_transitions t ON t.subject_id=c.session_id
+		WHERE t.subject_kind='session' AND t.cause_key IN ('end','drain_end')
+		ORDER BY t.run_at LIMIT 1`, ticketID, c.OrgID, c.SessionID, c.Subject,
+		clientIP.String()).Scan(&endsAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		httpx.Fail(w, r, httpx.ErrUnauthorized())
+		return
+	}
+	if err != nil {
+		httpx.Fail(w, r, err)
+		return
+	}
+	c.ID = ""
+	c.Audience = jwt.ClaimStrings{mediaSessionAudience}
+	c.ExpiresAt = jwt.NewNumericDate(endsAt.Add(5 * time.Minute))
+	mediaToken, err := jwt.NewWithClaims(jwt.SigningMethodHS256, c).SignedString(h.secret)
+	if err != nil {
+		httpx.Fail(w, r, err)
+		return
+	}
+	httpx.JSON(w, r, 200, map[string]any{"ends_at": endsAt, "media_token": mediaToken})
+}
+
+func requestIP(r *http.Request) (string, error) {
+	raw := strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-For"), ",")[0])
+	if raw == "" {
+		raw = r.RemoteAddr
+		if host, _, err := net.SplitHostPort(raw); err == nil {
+			raw = host
+		}
+	}
+	if ip := net.ParseIP(raw); ip != nil {
+		return ip.String(), nil
+	}
+	return "", httpx.ErrBadRequest("The client network address is invalid.")
 }
 
 // Finish is called by the trusted media service only after buffered audio is saved.
@@ -394,7 +484,7 @@ func (h *Handlers) Question(w http.ResponseWriter, r *http.Request) {
 		httpx.Fail(w, r, err)
 		return
 	}
-	question, err := h.question(r.Context(), c, assignment, stage)
+	question, err := h.question(r.Context(), c, assignment, stage, r.URL.Query().Get("speaking") == "true")
 	if err != nil {
 		httpx.LoggerFrom(r.Context()).Warn("judge unavailable", "error", err)
 		httpx.JSON(w, r, 200, map[string]string{"warning": "The judge is unavailable. Your transcript was saved."})

@@ -316,8 +316,13 @@ export type ModelBinding = {
   top_p: number;
   max_tokens: number;
   timeout_ms: number;
+  /** "" leaves the provider's own default alone; it is not the same as "none". */
+  reasoning_effort: ReasoningEffort;
   updated_at: string;
 };
+
+export const reasoningEfforts = ["", "none", "low", "medium", "high"] as const;
+export type ReasoningEffort = (typeof reasoningEfforts)[number];
 
 /** A failed test is a 200 with ok=false: the request worked, the provider did not. */
 export type ConnectionTest = {

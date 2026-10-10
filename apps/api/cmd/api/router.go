@@ -2,24 +2,25 @@ package main
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/cors"
 
-	"github.com/intelimek/megamoot/apps/api/internal/aiprofiles"
-	"github.com/intelimek/megamoot/apps/api/internal/assessments"
-	"github.com/intelimek/megamoot/apps/api/internal/auth"
-	"github.com/intelimek/megamoot/apps/api/internal/authz"
-	"github.com/intelimek/megamoot/apps/api/internal/httpx"
-	"github.com/intelimek/megamoot/apps/api/internal/orgs"
-	"github.com/intelimek/megamoot/apps/api/internal/platformcfg"
-	"github.com/intelimek/megamoot/apps/api/internal/reports"
-	"github.com/intelimek/megamoot/apps/api/internal/rubrics"
-	"github.com/intelimek/megamoot/apps/api/internal/sessions"
-	"github.com/intelimek/megamoot/apps/api/internal/submissions"
-	"github.com/intelimek/megamoot/apps/api/internal/teams"
-	"github.com/intelimek/megamoot/apps/api/internal/templates"
-	"github.com/intelimek/megamoot/apps/api/internal/users"
+	"github.com/slmlabs/megamoot/apps/api/internal/aiprofiles"
+	"github.com/slmlabs/megamoot/apps/api/internal/assessments"
+	"github.com/slmlabs/megamoot/apps/api/internal/auth"
+	"github.com/slmlabs/megamoot/apps/api/internal/authz"
+	"github.com/slmlabs/megamoot/apps/api/internal/httpx"
+	"github.com/slmlabs/megamoot/apps/api/internal/orgs"
+	"github.com/slmlabs/megamoot/apps/api/internal/platformcfg"
+	"github.com/slmlabs/megamoot/apps/api/internal/reports"
+	"github.com/slmlabs/megamoot/apps/api/internal/rubrics"
+	"github.com/slmlabs/megamoot/apps/api/internal/sessions"
+	"github.com/slmlabs/megamoot/apps/api/internal/submissions"
+	"github.com/slmlabs/megamoot/apps/api/internal/teams"
+	"github.com/slmlabs/megamoot/apps/api/internal/templates"
+	"github.com/slmlabs/megamoot/apps/api/internal/users"
 )
 
 func newRouter(a *app) http.Handler {
@@ -39,7 +40,7 @@ func newRouter(a *app) http.Handler {
 		MaxAge:           300,
 	}))
 
-	live, ready := healthHandlers(a.pool)
+	live, ready := healthHandlers(a.pool, a.ai)
 	r.Get("/healthz", live)
 	r.Get("/readyz", ready)
 
@@ -120,7 +121,7 @@ func newRouter(a *app) http.Handler {
 
 			r.Route("/assessments", func(r chi.Router) {
 				r.With(authz.Require("knowledge.view")).Get("/{assessmentID}/resources", submissionHandlers.ListResources)
-				r.With(authz.Require("knowledge.upload")).Post("/{assessmentID}/resources", submissionHandlers.UploadResource)
+				r.With(httpx.WriteDeadline(150*time.Second), authz.Require("knowledge.upload")).Post("/{assessmentID}/resources", submissionHandlers.UploadResource)
 				r.With(authz.Require("assessment.view")).Get("/", assessmentHandlers.List)
 				r.With(authz.Require("assessment.view")).
 					Get("/{assessmentID}", assessmentHandlers.Get)
@@ -149,7 +150,7 @@ func newRouter(a *app) http.Handler {
 
 				// Uploading requires team membership as well as the
 				// permission; the handler checks it.
-				r.With(authz.Require("submission.upload")).
+				r.With(httpx.WriteDeadline(150*time.Second), authz.Require("submission.upload")).
 					Post("/{assignmentID}/stages/{stageID}/submissions", submissionHandlers.Upload)
 				r.With(authz.RequireAny("submission.view", "submission.view_own")).
 					Get("/{assignmentID}/submissions", submissionHandlers.List)

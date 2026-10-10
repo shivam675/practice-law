@@ -10,8 +10,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/intelimek/megamoot/apps/api/internal/spec"
-	"github.com/intelimek/megamoot/apps/api/internal/workflow"
+	"github.com/slmlabs/megamoot/apps/api/internal/spec"
+	"github.com/slmlabs/megamoot/apps/api/internal/workflow"
 )
 
 // Worker grades the automated_evaluation stages that are waiting.
@@ -120,6 +120,17 @@ func (w *Worker) claimable(ctx context.Context) ([]pendingStage, error) {
 		  AND NOT EXISTS (SELECT 1 FROM assignment_stages prior
 		      WHERE prior.assignment_id=s.assignment_id AND prior.organization_id=s.organization_id
 		      AND prior.sort_order<s.sort_order AND prior.status NOT IN ('completed','expired','skipped','failed'))
+		  -- Backoff. A stage that just failed fails the same way on the next
+		  -- tick, and a 20s retry loop over a model call pins the GPU for as
+		  -- long as the cause survives. Ten minutes is long enough to fix a
+		  -- binding and short enough that nobody waits on it.
+		  AND NOT EXISTS (SELECT 1 FROM evaluations e
+		      WHERE e.organization_id = s.organization_id
+		        AND e.assignment_id = s.assignment_id
+		        AND e.stage_id = s.stage_id
+		        AND e.evaluator_kind = 'ai'
+		        AND e.status = 'failed'
+		        AND e.completed_at > now() - interval '10 minutes')
 		ORDER BY s.started_at
 		LIMIT 3`)
 	if err != nil {

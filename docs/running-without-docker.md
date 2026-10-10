@@ -39,7 +39,7 @@ cp .env.example .env
 sed -i 's/^POSTGRES_HOST=postgres/POSTGRES_HOST=localhost/' .env
 sed -i 's|^DATABASE_URL=.*|DATABASE_URL=postgres://megamoot:megamoot_dev_password@localhost:5432/megamoot?sslmode=disable|' .env
 sed -i 's|^AI_SERVICE_URL=.*|AI_SERVICE_URL=http://localhost:8100|' .env
-sed -i 's|^MEDIA_SERVICE_URL=.*|MEDIA_SERVICE_URL=http://localhost:8200|' .env
+sed -i 's|^MEDIA_SERVICE_URL=.*|MEDIA_SERVICE_URL=http://localhost:8400|' .env
 sed -i 's|^BLOB_FS_ROOT=.*|BLOB_FS_ROOT=./data/blobs|' .env
 mkdir -p data/blobs
 ```
@@ -84,7 +84,7 @@ npm run dev
 ```
 
 Open `http://localhost:5173`. The Vite development server sends `/api` to
-`http://localhost:8080` and `/speech` to `http://localhost:8200`. These are the
+`http://localhost:8080` and `/speech` to `http://localhost:8400`. These are the
 defaults in `vite.config.ts`. You do not need to set `VITE_API_PROXY` or
 `VITE_MEDIA_PROXY`.
 
@@ -99,8 +99,8 @@ python3 -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt
 MEDIA_SERVICE_TOKEN=local_speech_development_only_change_me \
 CONTROL_API_URL=http://localhost:8080/api/v1 \
-MEDIA_ORIGINS=http://localhost:5173 STT_DEVICE=cpu TTS_DEVICE=cpu \
-uvicorn app:app --port 8200
+MEDIA_ORIGINS=http://localhost:5173 STT_DEVICE=cpu \
+uvicorn app:app --port 8400
 ```
 
 ## What this setup does not give you

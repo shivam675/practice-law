@@ -2,7 +2,8 @@
 $ErrorActionPreference='Stop'
 $settings=@{}
 Get-Content (Join-Path $PSScriptRoot '..\.env') | ForEach-Object {if($_ -match '^([A-Z0-9_]+)=(.*)$'){$settings[$Matches[1]]=$Matches[2].Trim()}}
-$base='http://localhost:8080/api/v1'
+$origin=if($env:STAGING_URL){$env:STAGING_URL.TrimEnd('/')}else{'http://localhost:8080'}
+$base="$origin/api/v1"
 function Call($method,$path,$auth,$body=$null){
  $args=@{Method=$method;Uri="$base$path";Headers=$auth;ContentType='application/json';TimeoutSec=45}
  if($null -ne $body){$args.Body=$body|ConvertTo-Json -Depth 15}

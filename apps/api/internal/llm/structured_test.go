@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -218,5 +219,60 @@ func TestStructuredGivesUpAfterOneRepair(t *testing.T) {
 	}
 	if calls != 2 {
 		t.Fatalf("made %d calls, want exactly 2", calls)
+	}
+}
+
+// Ollama puts a reasoning model's thinking in its own field and leaves
+// content empty when max_tokens runs out mid-thought. Reported as a missing
+// JSON object it sends an operator hunting the prompt; it is a budget.
+func TestChatNamesATruncatedReasoningBlock(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"","reasoning":"Okay, the user wants"},"finish_reason":"length"}],"usage":{"completion_tokens":64}}`)
+	}))
+	defer srv.Close()
+
+	_, err := New(Provider{BaseURL: srv.URL}).Chat(context.Background(),
+		ChatRequest{Model: "qwen3:4b", MaxTokens: 64,
+			Messages: []Message{{Role: "user", Content: "grade this"}}})
+	if err == nil {
+		t.Fatal("a response truncated before the answer must be an error")
+	}
+	if !strings.Contains(err.Error(), "max_tokens") {
+		t.Fatalf("the error must name the budget, got %q", err)
+	}
+	if calls != 1 {
+		t.Fatalf("a truncated response must not buy a repair attempt, got %d calls", calls)
+	}
+}
+
+func TestChatSendsReasoningEffortOnlyWhenSet(t *testing.T) {
+	var seen []any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		seen = append(seen, body["reasoning_effort"])
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"content":"{}"},"finish_reason":"stop"}]}`)
+	}))
+	defer srv.Close()
+
+	c := New(Provider{BaseURL: srv.URL})
+	req := ChatRequest{Model: "qwen3:4b", MaxTokens: 64,
+		Messages: []Message{{Role: "user", Content: "hi"}}}
+	if _, err := c.Chat(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	req.ReasoningEffort = "low"
+	if _, err := c.Chat(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+
+	// A provider that has never heard of the field must not be handed one.
+	if seen[0] != nil {
+		t.Fatalf("an unset effort must not reach the provider, got %v", seen[0])
+	}
+	if seen[1] != "low" {
+		t.Fatalf("a set effort must reach the provider, got %v", seen[1])
 	}
 }

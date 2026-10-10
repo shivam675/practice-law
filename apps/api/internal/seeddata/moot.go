@@ -18,7 +18,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/intelimek/megamoot/apps/api/internal/spec"
+	"github.com/slmlabs/megamoot/apps/api/internal/spec"
 )
 
 const (

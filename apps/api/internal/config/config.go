@@ -166,6 +166,13 @@ func Load() (Config, error) {
 		}
 	}
 
+	// The seeded organisation administrator is a development convenience too,
+	// and its placeholder password is published in .env.example.
+	if c.IsProduction() && c.SeedAdminPassword != "" && len(c.SeedAdminPassword) < 16 {
+		return c, fmt.Errorf("SEED_ADMIN_PASSWORD is too weak for production; " +
+			"use at least 16 characters or leave it unset")
+	}
+
 	if c.AIServiceToken == "" {
 		return c, fmt.Errorf("AI_SERVICE_TOKEN is required; it authenticates the control plane to the AI plane")
 	}

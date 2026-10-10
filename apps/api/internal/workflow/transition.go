@@ -21,8 +21,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/intelimek/megamoot/apps/api/internal/audit"
-	"github.com/intelimek/megamoot/apps/api/internal/httpx"
+	"github.com/slmlabs/megamoot/apps/api/internal/audit"
+	"github.com/slmlabs/megamoot/apps/api/internal/httpx"
 )
 
 type Subject string
@@ -234,11 +234,8 @@ var (
 	ErrNoop = errors.New("workflow: already in the target state")
 )
 
-// Hook runs after a transition commits. It is how one machine drives
-// another: a stage completing advances its assignment.
-//
-// Hooks never run inside the transaction, so a hook failure cannot roll back
-// a state change that already happened. They are wired once at start-up.
+// Hook runs from the durable follow-up queue after a transition commits. It is
+// how one machine drives another: a stage completing advances its assignment.
 type Hook func(ctx context.Context, req Request, from string) error
 
 type Engine struct {
@@ -276,17 +273,6 @@ func (e *Engine) Apply(ctx context.Context, req Request) error {
 	}
 
 	e.recordAudit(ctx, req, from)
-
-	if e.hook != nil {
-		if err := e.hook(ctx, req, from); err != nil {
-			// The transition itself is committed and correct; only the
-			// follow-on work failed. Surfacing it as a request failure would
-			// wrongly suggest the state change did not happen.
-			e.log.Error("post-transition hook failed",
-				"subject", req.Subject, "subject_id", req.SubjectID,
-				"from", from, "to", req.To, "error", err)
-		}
-	}
 	return nil
 }
 
@@ -345,6 +331,17 @@ func (e *Engine) ApplyTx(ctx context.Context, tx pgx.Tx, req Request) (from stri
 	}
 	if tag.RowsAffected() != 1 {
 		return from, httpx.ErrConflict("The record changed while the transition was being applied.")
+	}
+
+	_, err = tx.Exec(ctx, `
+		INSERT INTO workflow_followups
+			(organization_id, subject_kind, subject_id, from_state, target_state,
+			 cause, reason, actor_kind, actor_user_id)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+		req.OrganizationID, req.Subject, req.SubjectID, from, req.To,
+		req.Cause, req.Reason, req.Actor.Kind, req.Actor.UserID)
+	if err != nil {
+		return from, fmt.Errorf("queue transition follow-up: %w", err)
 	}
 
 	return from, nil

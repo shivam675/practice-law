@@ -1,7 +1,7 @@
 package submissions
 
 import (
-	"github.com/intelimek/megamoot/apps/api/internal/spec"
+	"github.com/slmlabs/megamoot/apps/api/internal/spec"
 	"strings"
 	"testing"
 )

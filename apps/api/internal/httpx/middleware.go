@@ -133,3 +133,16 @@ func SecurityHeaders(next http.Handler) http.Handler {
 		next.ServeHTTP(w, r)
 	})
 }
+
+// WriteDeadline gives known long-running routes enough time without weakening
+// the server-wide deadline for every other request.
+func WriteDeadline(timeout time.Duration) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(timeout)); err != nil {
+				LoggerFrom(r.Context()).Warn("set route write deadline", "error", err)
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}

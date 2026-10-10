@@ -18,6 +18,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 )
@@ -40,6 +41,12 @@ type ChatRequest struct {
 	TopP        float64
 	MaxTokens   int
 	Timeout     time.Duration
+
+	// ReasoningEffort is the OpenAI-compatible thinking budget: none, low,
+	// medium or high. Empty sends nothing and the provider keeps its default.
+	// It matters because a reasoning model spends MaxTokens on its thinking
+	// before it writes any answer at all.
+	ReasoningEffort string
 }
 
 type ChatResponse struct {
@@ -53,12 +60,16 @@ type ChatResponse struct {
 // Error carries the provider's own status so a caller can tell a bad
 // credential from a cold model from a box that is simply not there.
 type Error struct {
-	Status int
-	Detail string
+	Status  int
+	Detail  string
+	Timeout bool
 }
 
 func (e *Error) Error() string {
-	if e.Status == 0 {
+	switch {
+	case e.Timeout:
+		return "provider timed out: " + e.Detail
+	case e.Status == 0:
 		return "provider unreachable: " + e.Detail
 	}
 	return fmt.Sprintf("provider returned %d: %s", e.Status, e.Detail)
@@ -127,11 +138,15 @@ func (c *Client) Chat(ctx context.Context, req ChatRequest) (ChatResponse, error
 	if req.MaxTokens > 0 {
 		body["max_tokens"] = req.MaxTokens
 	}
+	if req.ReasoningEffort != "" {
+		body["reasoning_effort"] = req.ReasoningEffort
+	}
 
 	var out struct {
 		Model   string `json:"model"`
 		Choices []struct {
-			Message Message `json:"message"`
+			Message      Message `json:"message"`
+			FinishReason string  `json:"finish_reason"`
 		} `json:"choices"`
 		Usage struct {
 			PromptTokens     int `json:"prompt_tokens"`
@@ -147,6 +162,15 @@ func (c *Client) Chat(ctx context.Context, req ChatRequest) (ChatResponse, error
 	}
 	if len(out.Choices) == 0 {
 		return ChatResponse{Latency: latency}, &Error{Detail: "provider returned no choices"}
+	}
+
+	// A reasoning model spends max_tokens on its thinking before it writes a
+	// single character of the answer. Truncated there, the content is empty and
+	// every parser downstream reports a missing JSON object instead of the real
+	// cause, so name it here.
+	if strings.TrimSpace(out.Choices[0].Message.Content) == "" && out.Choices[0].FinishReason == "length" {
+		return ChatResponse{Latency: latency, OutputTokens: out.Usage.CompletionTokens},
+			&Error{Detail: fmt.Sprintf("response hit max_tokens (%d) before the answer began; a reasoning model needs a larger max_tokens", req.MaxTokens)}
 	}
 
 	return ChatResponse{
@@ -186,8 +210,8 @@ func (c *Client) call(ctx context.Context, method, path string, body any, dst an
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		if errors.Is(err, context.DeadlineExceeded) {
-			return &Error{Detail: "request timed out"}
+		if errors.Is(err, context.DeadlineExceeded) || os.IsTimeout(err) {
+			return &Error{Timeout: true, Detail: "request timed out"}
 		}
 		return &Error{Detail: err.Error()}
 	}

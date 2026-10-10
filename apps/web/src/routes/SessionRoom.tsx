@@ -33,6 +33,8 @@ export function SessionRoom() {
   const playbackQueue = useRef<Blob[]>([]);
   const playbackUrl = useRef("");
   const finishing = useRef(false);
+  const judgeSpeaking = useRef(false);
+  const synthesisEnded = useRef(false);
   const assignment = useQuery({queryKey: ["assignment", assignmentId], queryFn: () => api.get<Assignment>(`/assignments/${assignmentId}`), refetchInterval: observer ? 5000 : false});
   const session = useQuery({ queryKey: ["session", sessionId], queryFn: () => api.get<LiveSession>(`/sessions/${sessionId}`), enabled: !!sessionId, refetchInterval: 2000 });
 
@@ -45,7 +47,15 @@ export function SessionRoom() {
   function playNext() {
     if (player.current) return;
     const next = playbackQueue.current.shift();
-    if (!next) { setState("Listening"); return; }
+    if (!next) {
+      if (synthesisEnded.current) {
+        judgeSpeaking.current = false;
+        synthesisEnded.current = false;
+        if (socket.current?.readyState === WebSocket.OPEN) socket.current.send(JSON.stringify({ type: "playback_done" }));
+        setState("Listening");
+      }
+      return;
+    }
     playbackUrl.current = URL.createObjectURL(next);
     const sound = new Audio(playbackUrl.current); player.current = sound;
     setState("Examiner speaking");
@@ -61,6 +71,7 @@ export function SessionRoom() {
     stream.current?.getTracks().forEach((track) => track.stop()); stream.current = null;
     void context.current?.close(); context.current = null;
     stopPlayback();
+    judgeSpeaking.current = false; synthesisEnded.current = false;
   }
   useEffect(() => { const timer = window.setInterval(() => setNow(Date.now()), 1000); return () => { clearInterval(timer); disconnect(); }; }, []);
   useEffect(() => { if (session.data && session.data.status !== "running") { disconnect(); setState("Session ended"); } }, [session.data?.status]);
@@ -83,7 +94,7 @@ export function SessionRoom() {
         if (!(data instanceof ArrayBuffer)) {
           finishing.current = true;
           if (socket.current?.readyState === WebSocket.OPEN) {
-            if (data.audio.byteLength) socket.current.send(data.audio);
+            if (data.audio.byteLength) socket.current.send(judgeSpeaking.current ? new ArrayBuffer(data.audio.byteLength) : data.audio);
             socket.current.send(JSON.stringify({ type: "finish" }));
           }
           return;
@@ -91,11 +102,10 @@ export function SessionRoom() {
         const samples = new Int16Array(data);
         const peak = samples.reduce((max, value) => Math.max(max, Math.abs(value)), 0) / 32768;
         setLevel(peak);
-        if (peak > 0.08 && player.current) stopPlayback();
         if (!finishing.current && socket.current?.readyState === WebSocket.OPEN) {
           if (socket.current.bufferedAmount > 16000 * 2 * 3) {
             socket.current.close(); setError(new Error("The connection is too slow. Reconnect to continue."));
-          } else socket.current.send(data);
+          } else socket.current.send(judgeSpeaking.current ? new ArrayBuffer(data.byteLength) : data);
         }
       };
       const mute = audio.createGain(); mute.gain.value = 0;
@@ -123,12 +133,13 @@ export function SessionRoom() {
         }
         const event = JSON.parse(data);
         if (event.type === "ready") setState("Listening");
-        if (event.type === "speech_started") { stopPlayback(); setState("Listening"); }
+        if (event.type === "speech_started" && !judgeSpeaking.current) { stopPlayback(); setState("Listening"); }
         if (event.type === "transcript_partial") setPartial(event.text);
-        if (event.type === "transcript_final") { setPartial(event.text); setState("Examiner considering"); }
-        if (event.type === "saved") { setPartial(""); setState("Listening"); void session.refetch(); }
+        if (event.type === "transcript_final") { setPartial(event.text); if (!judgeSpeaking.current) setState("Examiner considering"); }
+        if (event.type === "saved") { setPartial(""); if (!judgeSpeaking.current) setState("Listening"); void session.refetch(); }
         if (event.type === "drained") { finishing.current = true; stream.current?.getTracks().forEach((track) => track.stop()); setState("Speech saved"); void session.refetch(); }
-        if (event.type === "question") { setQuestion(event.text); setPartial(""); void session.refetch(); }
+        if (event.type === "question") { judgeSpeaking.current = true; synthesisEnded.current = false; stopPlayback(); setState(`${event.speaker || "Examiner"} speaking`); setQuestion(event.text); setPartial(""); void session.refetch(); }
+        if (event.type === "judge_audio_end") { synthesisEnded.current = true; playNext(); }
         if (event.type === "error" || event.type === "warning") setError(new Error(event.message));
       };
     } catch (err) { setError(err); }

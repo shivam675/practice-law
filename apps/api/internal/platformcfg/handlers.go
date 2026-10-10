@@ -9,10 +9,10 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
-	"github.com/intelimek/megamoot/apps/api/internal/audit"
-	"github.com/intelimek/megamoot/apps/api/internal/auth"
-	"github.com/intelimek/megamoot/apps/api/internal/httpx"
-	"github.com/intelimek/megamoot/apps/api/internal/llm"
+	"github.com/slmlabs/megamoot/apps/api/internal/audit"
+	"github.com/slmlabs/megamoot/apps/api/internal/auth"
+	"github.com/slmlabs/megamoot/apps/api/internal/httpx"
+	"github.com/slmlabs/megamoot/apps/api/internal/llm"
 )
 
 type Handlers struct {
@@ -189,7 +189,8 @@ func (h *Handlers) Test(w http.ResponseWriter, r *http.Request) {
 	}
 
 	client := llm.New(provider)
-	result := TestResult{}
+	// Never nil: a nil slice marshals to null and the settings page reads .length.
+	result := TestResult{Models: []string{}}
 
 	// Listing models is the cheap half: it proves the host, the TLS chain and
 	// the bearer token without occupying the GPU.
@@ -223,8 +224,13 @@ func (h *Handlers) Test(w http.ResponseWriter, r *http.Request) {
 		Messages:    []llm.Message{{Role: "user", Content: prompt}},
 		Temperature: binding.Temperature,
 		TopP:        binding.TopP,
-		MaxTokens:   min(binding.MaxTokens, 64),
-		Timeout:     time.Duration(binding.TimeoutMS) * time.Millisecond,
+		// The binding's own budget, not a cheap cap: a reasoning model spends
+		// hundreds of tokens thinking before it answers, so a 64-token test
+		// fails every time and says nothing about the provider.
+		MaxTokens: binding.MaxTokens,
+		Timeout:   time.Duration(binding.TimeoutMS) * time.Millisecond,
+
+		ReasoningEffort: binding.ReasoningEffort,
 	})
 
 	orgID := p.OrganizationID

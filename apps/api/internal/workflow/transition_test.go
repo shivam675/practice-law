@@ -3,6 +3,7 @@ package workflow
 import (
 	"sort"
 	"testing"
+	"time"
 )
 
 func TestAllowedTransitions(t *testing.T) {
@@ -36,6 +37,15 @@ func TestAllowedTransitions(t *testing.T) {
 			t.Errorf("Allowed(%s, %s -> %s) = %v, want %v",
 				c.subject, c.from, c.to, got, c.want)
 		}
+	}
+}
+
+func TestRetryDelayIsExponentialAndCapped(t *testing.T) {
+	if got := retryDelay(1); got != 20*time.Second {
+		t.Fatalf("first retry delay = %s, want 20s", got)
+	}
+	if got := retryDelay(100); got != 10*time.Minute {
+		t.Fatalf("retry delay cap = %s, want 10m", got)
 	}
 }
 

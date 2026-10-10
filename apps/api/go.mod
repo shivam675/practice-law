@@ -1,4 +1,4 @@
-module github.com/intelimek/megamoot/apps/api
+module github.com/slmlabs/megamoot/apps/api
 
 go 1.23
 

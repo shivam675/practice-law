@@ -8,10 +8,10 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/intelimek/megamoot/apps/api/internal/httpx"
-	"github.com/intelimek/megamoot/apps/api/internal/rubrics"
-	"github.com/intelimek/megamoot/apps/api/internal/spec"
 	"github.com/jackc/pgx/v5"
+	"github.com/slmlabs/megamoot/apps/api/internal/httpx"
+	"github.com/slmlabs/megamoot/apps/api/internal/rubrics"
+	"github.com/slmlabs/megamoot/apps/api/internal/spec"
 )
 
 // Regrade replaces one criterion, committing a complete new evaluation only

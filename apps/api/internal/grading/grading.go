@@ -25,10 +25,10 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/intelimek/megamoot/apps/api/internal/harness"
-	"github.com/intelimek/megamoot/apps/api/internal/llm"
-	"github.com/intelimek/megamoot/apps/api/internal/retrieval"
-	"github.com/intelimek/megamoot/apps/api/internal/rubrics"
+	"github.com/slmlabs/megamoot/apps/api/internal/harness"
+	"github.com/slmlabs/megamoot/apps/api/internal/llm"
+	"github.com/slmlabs/megamoot/apps/api/internal/retrieval"
+	"github.com/slmlabs/megamoot/apps/api/internal/rubrics"
 )
 
 // PromptVersion is stamped on every evaluation and every ledger row. Bump it

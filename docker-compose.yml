@@ -110,9 +110,8 @@ services:
       MEDIA_ORIGINS: http://localhost:5173
       STT_MODEL: ${STT_MODEL:-small.en}
       STT_DEVICE: cpu
-      TTS_DEVICE: cpu
     ports:
-      - "127.0.0.1:8200:8200"
+      - "127.0.0.1:${MEDIA_HOST_PORT:-8400}:8200"
     volumes:
       - ./apps/media:/srv
       - speechmodels:/models

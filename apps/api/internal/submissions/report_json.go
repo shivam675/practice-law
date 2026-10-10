@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/intelimek/megamoot/apps/api/internal/compliance"
+	"github.com/slmlabs/megamoot/apps/api/internal/compliance"
 )
 
 func marshalReport(r *compliance.Report) ([]byte, error) {

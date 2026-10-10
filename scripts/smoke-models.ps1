@@ -10,7 +10,7 @@
 
 $ErrorActionPreference = 'Stop'
 
-$base = 'http://localhost:8080'
+$base = if ($env:STAGING_URL) { $env:STAGING_URL.TrimEnd('/') } else { 'http://localhost:8080' }
 $env_file = Join-Path $PSScriptRoot '..\.env'
 $settings = @{}
 Get-Content $env_file | ForEach-Object {

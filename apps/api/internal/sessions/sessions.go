@@ -18,6 +18,7 @@ import (
 	"github.com/slmlabs/megamoot/apps/api/internal/auth"
 	"github.com/slmlabs/megamoot/apps/api/internal/harness"
 	"github.com/slmlabs/megamoot/apps/api/internal/httpx"
+	"github.com/slmlabs/megamoot/apps/api/internal/llm"
 	"github.com/slmlabs/megamoot/apps/api/internal/spec"
 	"github.com/slmlabs/megamoot/apps/api/internal/workflow"
 )
@@ -485,9 +486,25 @@ func (h *Handlers) Question(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	question, err := h.question(r.Context(), c, assignment, stage, r.URL.Query().Get("speaking") == "true")
-	if err != nil {
+	switch {
+	case err == nil:
+	case errors.Is(err, context.Canceled):
+		// Counsel spoke again; the newer speech gets its own decision.
+		httpx.JSON(w, r, 200, map[string]string{"question": ""})
+		return
+	case errors.Is(err, llm.ErrUnstructured):
+		// A rejected or malformed model reply. A bench with nothing sound to
+		// ask stays silent, so the student sees nothing.
+		httpx.LoggerFrom(r.Context()).Warn("judge produced no usable question", "error", err)
+		httpx.JSON(w, r, 200, map[string]string{"question": ""})
+		return
+	case errors.Is(err, errNoMaterials):
+		httpx.LoggerFrom(r.Context()).Warn("judge has no case materials", "error", err)
+		httpx.JSON(w, r, 200, map[string]string{"warning": "The judge has no case materials to ask about. Your speech is being saved; tell your teacher."})
+		return
+	default:
 		httpx.LoggerFrom(r.Context()).Warn("judge unavailable", "error", err)
-		httpx.JSON(w, r, 200, map[string]string{"warning": "The judge is unavailable. Your transcript was saved."})
+		httpx.JSON(w, r, 200, map[string]string{"warning": "The judge is temporarily unavailable. Keep going: your speech is being saved."})
 		return
 	}
 	voice, name := "af_heart", "Examiner"

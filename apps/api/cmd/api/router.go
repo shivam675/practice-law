@@ -2,6 +2,7 @@ package main
 
 import (
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -11,6 +12,7 @@ import (
 	"github.com/slmlabs/megamoot/apps/api/internal/assessments"
 	"github.com/slmlabs/megamoot/apps/api/internal/auth"
 	"github.com/slmlabs/megamoot/apps/api/internal/authz"
+	"github.com/slmlabs/megamoot/apps/api/internal/feedback"
 	"github.com/slmlabs/megamoot/apps/api/internal/httpx"
 	"github.com/slmlabs/megamoot/apps/api/internal/orgs"
 	"github.com/slmlabs/megamoot/apps/api/internal/platformcfg"
@@ -56,15 +58,33 @@ func newRouter(a *app) http.Handler {
 	profileHandlers := aiprofiles.NewHandlers(a.aiProfiles, a.audit)
 	reportHandlers := reports.New(a.pool, a.engine, a.grading)
 	sessionHandlers := sessions.New(a.pool, a.engine, a.harness, a.cfg.MediaServiceToken, a.cfg.MaxConcurrentLiveSessions)
+	feedbackHandlers := feedback.New(a.pool)
 
 	// Credential endpoints get their own bucket. Everything else shares a
 	// looser one; per-tenant quotas arrive with usage accounting.
-	loginLimiter := httpx.NewRateLimiter(20, 5)
+	//
+	// The buckets are per IP, and a classroom behind campus NAT is one IP:
+	// forty students signing in together, and polling a session page every
+	// two seconds, must fit. Password guessing against one account is stopped
+	// by the account lockout, not by these.
+	loginLimiter := httpx.NewRateLimiter(240, 60)
 	resetLimiter := httpx.NewRateLimiter(10, 2)
-	apiLimiter := httpx.NewRateLimiter(600, 120)
+	apiLimiter := httpx.NewRateLimiter(3000, 300)
 
 	r.Route("/api/v1", func(r chi.Router) {
-		r.Use(apiLimiter.LimitByIP)
+		// The speech service calls /media/* for every live room from one
+		// address, authenticated by its service token. A shared bucket would
+		// let one busy room starve another's judge.
+		r.Use(func(next http.Handler) http.Handler {
+			limited := apiLimiter.LimitByIP(next)
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if strings.HasPrefix(r.URL.Path, "/api/v1/media/") {
+					next.ServeHTTP(w, r)
+					return
+				}
+				limited.ServeHTTP(w, r)
+			})
+		})
 		r.Get("/media/session", sessionHandlers.Verify)
 		r.Post("/media/turn", sessionHandlers.Turn)
 		r.Post("/media/finish", sessionHandlers.Finish)
@@ -85,6 +105,9 @@ func newRouter(a *app) http.Handler {
 			r.With(authz.Require("platform.organization.manage")).Post("/admin/organizations", orgHandlers.Create)
 			r.With(authz.RequireAny("session.join", "session.observe")).Get("/sessions/{sessionID}", sessionHandlers.Get)
 			r.With(authz.RequireAny("session.join", "session.moderate")).Post("/sessions/{sessionID}/end", sessionHandlers.End)
+			r.With(authz.Require("session.join")).Post("/sessions/{sessionID}/feedback", feedbackHandlers.Submit)
+			r.With(authz.Require("session.join")).Get("/sessions/{sessionID}/feedback/mine", feedbackHandlers.Mine)
+			r.With(authz.Require("report.view")).Get("/feedback", feedbackHandlers.List)
 
 			r.Route("/users", func(r chi.Router) {
 				r.With(authz.Require("user.edit")).Post("/{userID}/password-reset", authHandlers.IssuePasswordReset)
@@ -139,6 +162,8 @@ func newRouter(a *app) http.Handler {
 			// permission, so view_own cannot be used to read someone else's.
 			r.Route("/assignments", func(r chi.Router) {
 				r.With(authz.Require("assessment.grade")).Post("/{assignmentID}/report/regrade", reportHandlers.Regrade)
+				r.With(authz.Require("assessment.grade")).Post("/{assignmentID}/grading", reportHandlers.Autograde)
+				r.With(authz.Require("report.view")).Get("/{assignmentID}/grading", reportHandlers.GradingProgress)
 				r.With(authz.RequireAny("report.view", "report.view_own")).Get("/{assignmentID}/report", reportHandlers.Get)
 				r.With(authz.Require("assessment.override_grade")).Patch("/{assignmentID}/report/scores", reportHandlers.Override)
 				r.With(authz.Require("report.publish")).Post("/{assignmentID}/report/publish", reportHandlers.Publish)

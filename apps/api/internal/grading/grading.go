@@ -34,17 +34,16 @@ import (
 // PromptVersion is stamped on every evaluation and every ledger row. Bump it
 // whenever the wording below changes, so a disputed grade is reproducible and
 // a prompt change can drive a targeted re-grade.
-const PromptVersion = "grade.criterion.v2"
-
-// maxInlineChars is how much submission text goes into a prompt whole. Above
-// it, the criterion's own retrieval decides what the model sees; a memorial
-// that long would otherwise crowd out the rubric guidance.
-const maxInlineChars = 48000
+const PromptVersion = "grade.criterion.v3"
 
 // contextChunks is how many passages of the problem and the authorities are
-// retrieved per criterion. Enough to ground a citation claim, not so many
-// that the submission stops being the thing under examination.
-const contextChunks = 6
+// retrieved per criterion, each clipped to materialChars. Enough to ground a
+// citation claim, not so many that the submission stops being the thing under
+// examination or a small model loses the rubric.
+const (
+	contextChunks = 3
+	materialChars = 1200
+)
 
 type Store struct {
 	pool      *pgxpool.Pool
@@ -117,6 +116,9 @@ type Target struct {
 	RubricScope []string
 	Sources     []string
 	TraceID     string
+	// EvaluationID is the pending row a teacher's Autograde request created.
+	// Grading promotes that row instead of opening a new one.
+	EvaluationID uuid.UUID
 }
 
 // Result is what the caller needs to decide the next transition. Caveats name
@@ -170,12 +172,21 @@ func (s *Store) GradeSubmission(ctx context.Context, t Target) (result Result, r
 
 	res := Result{EvaluationID: evaluationID, Caveats: []string{}}
 	for _, c := range criteria {
+		// The GPU belongs to a live round first. Grading resumes between
+		// criteria once it ends.
+		if err := s.waitWhileLive(ctx); err != nil {
+			return res, err
+		}
 		scored, err := s.gradeOne(ctx, t, sub, c, sourceText)
 		if err != nil {
 			s.log.Warn("grading: criterion not scored",
 				"assignment_id", t.AssignmentID, "criterion", c.Key, "error", err)
-			res.Caveats = append(res.Caveats,
-				fmt.Sprintf("%s was not scored automatically: %s", c.Name, reason(err)))
+			caveat := fmt.Sprintf("%s was not scored automatically: %s", c.Name, reason(err))
+			res.Caveats = append(res.Caveats, caveat)
+			// Written now so the teacher watching progress sees it now.
+			if _, err := s.pool.Exec(ctx, `UPDATE evaluations SET caveats = caveats || $2::text WHERE id = $1`, evaluationID, caveat); err != nil {
+				return res, fmt.Errorf("record caveat: %w", err)
+			}
 			continue
 		}
 
@@ -200,13 +211,9 @@ func (s *Store) GradeSubmission(ctx context.Context, t Target) (result Result, r
 
 func (s *Store) gradeOne(ctx context.Context, t Target, sub submission,
 	c rubrics.Criterion, sourceText string) (*criterionResult, error) {
-	record, err := s.assessmentRecord(ctx, t, c, sourceText)
-	if err != nil {
-		return nil, err
-	}
 	blocks := []harness.Untrusted{{
 		Label: "assessment_record",
-		Text:  record,
+		Text:  excerpt(sourceText, c),
 	}}
 
 	// Case materials ground a claim about authority. They are teacher-supplied
@@ -217,7 +224,7 @@ func (s *Store) gradeOne(ctx context.Context, t Target, sub submission,
 	}
 
 	out := &criterionResult{maxScore: c.MaxScore}
-	err = s.harness.Structured(ctx, harness.Call{
+	err := s.harness.Structured(ctx, harness.Call{
 		Tier:           "grader",
 		Purpose:        "grade_criterion",
 		PromptVersion:  PromptVersion,
@@ -255,7 +262,7 @@ func (s *Store) caseMaterials(ctx context.Context, t Target, sub submission,
 
 	var b strings.Builder
 	for _, h := range hits {
-		fmt.Fprintf(&b, "[%s]\n%s\n\n", h.Locator, h.Content)
+		fmt.Fprintf(&b, "[%s]\n%s\n\n", h.Locator, clip(h.Content, materialChars))
 	}
 	return strings.TrimSpace(b.String())
 }
@@ -413,55 +420,35 @@ func inScope(all []rubrics.Criterion, scope []string) []rubrics.Criterion {
 	return out
 }
 
-// openEvaluation supersedes any completed evaluation for this stage rather
-// than updating it. Evaluation rows are immutable: a re-grade must leave the
-// original readable, because a student may already have seen it.
+// openEvaluation starts the running row: the teacher's pending request when
+// there is one, a new row otherwise. Any completed evaluation stays current
+// until closeEvaluation replaces it, so a re-grade that fails halfway leaves
+// the report as it was.
 func (s *Store) openEvaluation(ctx context.Context, t Target, rubricID uuid.UUID) (uuid.UUID, error) {
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return uuid.Nil, fmt.Errorf("begin evaluation: %w", err)
-	}
-	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
-
-	var supersedes *uuid.UUID
-	var prior uuid.UUID
-	err = tx.QueryRow(ctx, `
-		SELECT id FROM evaluations
-		WHERE assignment_id = $1 AND stage_id = $2 AND evaluator_kind = 'ai'
-		  AND status = 'completed' AND supersedes_id IS NULL`,
-		t.AssignmentID, t.StageID).Scan(&prior)
-	switch {
-	case err == nil:
-		supersedes = &prior
-	case errors.Is(err, pgx.ErrNoRows):
-	default:
-		return uuid.Nil, fmt.Errorf("find prior evaluation: %w", err)
-	}
-
-	// The partial unique index allows exactly one current completed AI
-	// evaluation per stage, so the prior one is marked superseded before the
-	// new one can claim the slot.
-	if supersedes != nil {
-		if _, err := tx.Exec(ctx,
-			`UPDATE evaluations SET status = 'superseded' WHERE id = $1`, prior); err != nil {
-			return uuid.Nil, fmt.Errorf("supersede evaluation %s: %w", prior, err)
-		}
-	}
-
 	var id uuid.UUID
-	if err := tx.QueryRow(ctx, `
+	if t.EvaluationID != uuid.Nil {
+		err := s.pool.QueryRow(ctx, `
+			UPDATE evaluations SET status = 'running', started_at = now(),
+			       prompt_version = $3, caveats = '{}'
+			WHERE id = $1 AND organization_id = $2 AND status = 'pending' RETURNING id`,
+			t.EvaluationID, t.OrganizationID, PromptVersion).Scan(&id)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return uuid.Nil, fmt.Errorf("grading request %s is no longer pending", t.EvaluationID)
+		}
+		if err != nil {
+			return uuid.Nil, fmt.Errorf("start evaluation: %w", err)
+		}
+		return id, nil
+	}
+	if err := s.pool.QueryRow(ctx, `
 		INSERT INTO evaluations
 			(organization_id, assignment_id, stage_id, rubric_id, evaluator_kind,
-			 status, prompt_version, supersedes_id, started_at)
-		VALUES ($1,$2,$3,$4,'ai','running',$5,$6, now())
+			 status, prompt_version, started_at)
+		VALUES ($1,$2,$3,$4,'ai','running',$5, now())
 		RETURNING id`,
 		t.OrganizationID, t.AssignmentID, t.StageID, rubricID,
-		PromptVersion, supersedes).Scan(&id); err != nil {
+		PromptVersion).Scan(&id); err != nil {
 		return uuid.Nil, fmt.Errorf("open evaluation: %w", err)
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return uuid.Nil, fmt.Errorf("commit open evaluation: %w", err)
 	}
 	return id, nil
 }
@@ -557,16 +544,36 @@ func (s *Store) materialFor(ctx context.Context, t Target, sub submission, quote
 	return b.String()
 }
 
+// closeEvaluation completes the run and supersedes the evaluation it
+// replaces in one transaction. Evaluation rows are immutable: the prior one
+// stays readable, because a student may already have seen it, and the partial
+// unique index allows one current completed AI evaluation per stage.
 func (s *Store) closeEvaluation(ctx context.Context, id uuid.UUID, res Result) error {
-	if _, err := s.pool.Exec(ctx, `
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin close evaluation: %w", err)
+	}
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	var prior *uuid.UUID
+	err = tx.QueryRow(ctx, `
+		UPDATE evaluations old SET status = 'superseded'
+		FROM evaluations cur
+		WHERE cur.id = $1 AND old.organization_id = cur.organization_id
+		  AND old.assignment_id = cur.assignment_id AND old.stage_id = cur.stage_id
+		  AND old.evaluator_kind = 'ai' AND old.status = 'completed' AND old.id <> cur.id
+		RETURNING old.id`, id).Scan(&prior)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("supersede prior evaluation: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
 		UPDATE evaluations
 		SET status = 'completed', weighted_total = $2, max_total = $3,
-		    caveats = $4, completed_at = now()
+		    caveats = $4, supersedes_id = $5, completed_at = now()
 		WHERE id = $1`,
-		id, res.WeightedTotal, res.MaxTotal, res.Caveats); err != nil {
+		id, res.WeightedTotal, res.MaxTotal, res.Caveats, prior); err != nil {
 		return fmt.Errorf("close evaluation %s: %w", id, err)
 	}
-	return nil
+	return tx.Commit(ctx)
 }
 
 func (s *Store) failEvaluation(ctx context.Context, id uuid.UUID, why string) error {
@@ -585,6 +592,8 @@ func (s *Store) failEvaluation(ctx context.Context, id uuid.UUID, why string) er
 // The underlying error still goes to the log in full.
 func reason(err error) string {
 	switch {
+	case errors.Is(err, errStageClosed):
+		return "the stage can no longer be graded"
 	case errors.Is(err, llm.ErrUnstructured):
 		return "the assessor did not return a usable result"
 	case errors.Is(err, context.DeadlineExceeded):

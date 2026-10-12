@@ -1,6 +1,7 @@
 import { NavLink, Outlet } from "react-router-dom";
 import {
   Books,
+  ChatCircleText,
   Gavel,
   House,
   Robot,
@@ -23,6 +24,7 @@ const staffNav: NavItem[] = [
   { to: "/admin/users", label: "People", icon: UsersThree, permission: "user.view" },
   { to: "/templates", label: "Templates", icon: Stack, permission: "template.view" },
   { to: "/rubrics", label: "Rubrics", icon: Stack, permission: "rubric.view" },
+  { to: "/feedback", label: "Round feedback", icon: ChatCircleText, permission: "report.view" },
   { to: "/admin/actors", label: "AI actors", icon: Robot, permission: "ai_profile.view" },
   { to: "/admin/organization", label: "Organisation", icon: House, permission: "organization.edit" },
   { to: "/admin/organizations", label: "Organisations", icon: House, permission: "platform.organization.manage" },

@@ -169,13 +169,20 @@ func (s *Store) Search(ctx context.Context, q Query) ([]Hit, error) {
 			Purpose:        "retrieval_query",
 			OrganizationID: &q.OrganizationID,
 		}, []string{q.Text})
+		// An embedding model that is down or misbound must not take the case
+		// materials away from a grade: full-text search alone still finds them.
 		if err != nil {
-			return nil, err
+			s.log.Warn("retrieval: embedding failed, searching text only", "error", err)
+		} else {
+			vector = vectors[0]
 		}
-		vector = vectors[0]
 	}
-	if len(vector) == 0 {
+	if len(vector) == 0 && strings.TrimSpace(q.Text) == "" {
 		return nil, errors.New("retrieval: a query needs text or a vector")
+	}
+	var dense any // NULL skips the vector half of the fusion.
+	if len(vector) > 0 {
+		dense = llm.Vector(vector)
 	}
 
 	// candidates is deliberately wider than Limit: fusion only improves on
@@ -189,14 +196,14 @@ func (s *Store) Search(ctx context.Context, q Query) ([]Hit, error) {
 			JOIN documents d ON d.id = c.document_id
 			LEFT JOIN knowledge_sources ks ON ks.id = d.knowledge_source_id
 			WHERE c.organization_id = $1
-			  AND c.embedding IS NOT NULL
+			  AND ($5::vector IS NULL OR c.embedding IS NOT NULL)
 			  AND ($2::uuid[] IS NULL OR c.document_id = ANY($2))
 			  AND ($3::uuid   IS NULL OR ks.assessment_id = $3)
 			  AND ($4::text[] IS NULL OR ks.kind = ANY($4))
 		),
 		dense AS (
 			SELECT id, row_number() OVER (ORDER BY embedding <=> $5::vector) AS rank
-			FROM scope ORDER BY embedding <=> $5::vector LIMIT $6
+			FROM scope WHERE $5::vector IS NOT NULL ORDER BY embedding <=> $5::vector LIMIT $6
 		),
 		lexical AS (
 			SELECT id, row_number() OVER (
@@ -215,7 +222,7 @@ func (s *Store) Search(ctx context.Context, q Query) ([]Hit, error) {
 		ORDER BY score DESC
 		LIMIT $9`,
 		q.OrganizationID, nilUUIDs(q.DocumentIDs), q.AssessmentID, nilStrings(q.SourceKinds),
-		llm.Vector(vector), candidates, strings.TrimSpace(q.Text), rrfK, q.Limit)
+		dense, candidates, strings.TrimSpace(q.Text), rrfK, q.Limit)
 	if err != nil {
 		return nil, fmt.Errorf("search chunks: %w", err)
 	}

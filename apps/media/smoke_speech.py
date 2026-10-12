@@ -4,6 +4,7 @@ Run through scripts/smoke-live.ps1 -Speech. Uses synthetic speech, no microphone
 """
 import asyncio
 import json
+import os
 import sys
 import time
 import re
@@ -22,7 +23,7 @@ async def main():
     audio = np.interp(np.arange(0, len(audio), 1.5), np.arange(len(audio)), audio)
     pcm = (np.clip(audio, -1, 1) * 32767).astype("<i2").tobytes()
     pcm += bytes(16000 * 2 * 2)
-    async with connect("ws://localhost:8400/speech", origin="http://localhost:5173", max_size=8_000_000) as ws:
+    async with connect(os.environ.get("SMOKE_SPEECH_URL", "ws://localhost:8200/speech"), origin="http://localhost:5173", max_size=8_000_000) as ws:
         await ws.send(json.dumps({"ticket": request["ticket"]}))
         assert json.loads(await ws.recv())["type"] == "ready", "Speech service not ready"
         floor_free = asyncio.Event()

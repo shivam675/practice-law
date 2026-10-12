@@ -20,6 +20,13 @@ func (s *Store) Regrade(ctx context.Context, org, assignment, scoreID, actor uui
 	if strings.TrimSpace(reason) == "" || len(reason) > 4000 {
 		return httpx.ErrBadRequest("A reason of up to 4000 characters is required.")
 	}
+	// A regrade runs in the request, not the worker, so it checks for itself
+	// that no oral round needs the GPU.
+	if live, err := s.liveSessionRunning(ctx); err != nil {
+		return err
+	} else if live {
+		return httpx.ErrConflict("A live oral round is running. Regrade after it ends.")
+	}
 	var prior, criterion uuid.UUID
 	var stage string
 	var raw []byte

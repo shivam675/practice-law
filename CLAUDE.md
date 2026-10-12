@@ -23,6 +23,9 @@ docker compose up -d postgres redis minio
 docker compose up api
 ```
 
+Production runs `docker-compose.production.yml` on a Linux GPU server; the
+runbook is `docs/deploy.md`.
+
 Go toolchain is not installed on the dev host; build through Docker:
 
 ```bash
@@ -75,15 +78,17 @@ Milestones 1 to 5 are real: identity, RBAC, templates, rubrics, assessments,
 the workflow engine, submissions and the deterministic format checker. The web
 app covers them.
 
-**No model has been called yet.** `apps/ai` does document extraction and
-nothing else; `apps/media` does not exist, so there is no STT, no TTS and no
-VAD. `SessionRoom.tsx` says so at the top: it is a layout shell. The schema
-(`ai_profiles`, `ai_requests`, `assertions`, `judge_actions`, `evaluations`)
-is ahead of the code on purpose.
+`apps/ai` does document extraction. `apps/media` runs VAD, faster-whisper and
+TTS on CPU and calls the API for each judge decision; see
+`docs/live-session.md`. Live tiers run Qwen3 4B Instruct, grading Qwen3 8B,
+embeddings bge-m3, all through bindings. Small models get bounded context:
+see "Context budgets" in `docs/ai-harness.md`.
 
 What exists of milestone 6: the provider adapter (`internal/llm`), the request
-ledger, platform model configuration and AI actor profiles. The grading calls
-themselves are not written.
+ledger, platform model configuration, AI actor profiles, per-criterion grading
+and the live judge. **Grading never starts or retries by itself**: a teacher
+presses Autograde, the worker runs it between live rounds, and a failure stays
+failed until a teacher presses again.
 
 ## Hardware reality
 

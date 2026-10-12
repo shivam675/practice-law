@@ -36,6 +36,7 @@ type StructuredResponse struct {
 // produce it on the fifth attempt either, and a live session has a latency
 // budget that a retry loop destroys.
 func (c *Client) Structured(ctx context.Context, req ChatRequest, dst any) (StructuredResponse, error) {
+	req.JSON = true
 	first, err := c.Chat(ctx, req)
 	if err != nil {
 		return StructuredResponse{ChatResponse: first}, err

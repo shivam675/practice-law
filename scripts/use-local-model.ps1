@@ -35,8 +35,8 @@ $payload = foreach ($b in $existing) {
         temperature = $b.temperature
         top_p       = $b.top_p
         max_tokens  = $b.max_tokens
-        timeout_ms  = $b.timeout_ms
-        reasoning_effort = $b.reasoning_effort
+        timeout_ms  = if ($wanted -contains $b.tier -and $b.tier -in @('monitor','judge')) { [Math]::Max(6000,$b.timeout_ms) } else { $b.timeout_ms }
+        reasoning_effort = if ($wanted -contains $b.tier -and $b.tier -in @('monitor','judge')) { 'none' } else { $b.reasoning_effort }
     }
 }
 $out = Call PUT '/platform/bindings' $su @{ bindings = @($payload) }

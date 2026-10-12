@@ -9,18 +9,19 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/slmlabs/megamoot/apps/api/internal/spec"
 	"github.com/slmlabs/megamoot/apps/api/internal/workflow"
 )
 
-// Worker grades the automated_evaluation stages that are waiting.
+// Worker runs the grading a teacher requested with Autograde.
 //
-// A poll, not a hook. Grading a memorial is several model calls and takes
-// seconds to minutes; running it inside the transition that activates the
-// stage would hold a student's upload request open for the duration and lose
-// the work if the process restarted. The question "which stages are active
-// and have no completed evaluation" is one the database can already answer.
+// A poll, not a hook. Grading is several model calls and takes minutes;
+// running it inside the request would hold the teacher's connection open for
+// the duration and lose the work if the process restarted. The worker never
+// starts grading by itself and never retries a failed run: a pending row is
+// the only claim, and only a teacher writes one.
 type Worker struct {
 	store    *Store
 	engine   *workflow.Engine
@@ -29,7 +30,7 @@ type Worker struct {
 }
 
 func NewWorker(store *Store, engine *workflow.Engine, log *slog.Logger) *Worker {
-	return &Worker{store: store, engine: engine, log: log, Interval: 20 * time.Second}
+	return &Worker{store: store, engine: engine, log: log, Interval: 5 * time.Second}
 }
 
 func (w *Worker) Run(ctx context.Context) {
@@ -48,7 +49,8 @@ func (w *Worker) Run(ctx context.Context) {
 	}
 }
 
-type pendingStage struct {
+type pendingRun struct {
+	evaluationID uuid.UUID
 	stageRowID   uuid.UUID
 	orgID        uuid.UUID
 	assignmentID uuid.UUID
@@ -58,7 +60,7 @@ type pendingStage struct {
 
 func (w *Worker) once(ctx context.Context) {
 	// ponytail: one grading worker across API processes. Replace this lock with
-	// per-stage claims when parallel grading is required.
+	// per-evaluation claims when parallel grading is required.
 	conn, err := w.store.pool.Acquire(ctx)
 	if err != nil {
 		w.log.Error("acquire grading lock connection", "error", err)
@@ -77,120 +79,112 @@ func (w *Worker) once(ctx context.Context) {
 		}
 	}()
 	// The lock proves no worker is still using a running row. A process crash
-	// releases the lock, so interrupted evaluations can be retried safely.
-	if _, err := conn.Exec(ctx, `UPDATE evaluations SET status = 'failed', failure_reason = 'Evaluation interrupted. Retrying.', completed_at = now() WHERE status = 'running' AND evaluator_kind = 'ai'`); err != nil {
+	// releases the lock; the interrupted run is closed, not resumed.
+	if _, err := conn.Exec(ctx, `UPDATE evaluations SET status = 'failed', failure_reason = 'Grading was interrupted. Press Autograde to start again.', completed_at = now() WHERE status = 'running' AND evaluator_kind = 'ai'`); err != nil {
 		w.log.Error("recover grading", "error", err)
 		return
 	}
-	stages, err := w.claimable(ctx)
-	if err != nil {
-		w.log.Error("grading worker: find pending evaluations failed", "error", err)
+	// A live round owns the GPU. Requests wait for it to end.
+	if live, err := w.store.liveSessionRunning(ctx); err != nil || live {
 		return
 	}
-
-	for _, st := range stages {
-		if err := w.grade(ctx, st); err != nil {
+	runs, err := w.claimable(ctx)
+	if err != nil {
+		w.log.Error("grading worker: find requested evaluations failed", "error", err)
+		return
+	}
+	for _, run := range runs {
+		if err := w.grade(ctx, run); err != nil {
 			w.log.Warn("grading worker: stage not graded",
-				"assignment_id", st.assignmentID, "stage_id", st.stageID, "error", err)
-			// A bad submission must not block other assignments.
-			continue
+				"assignment_id", run.assignmentID, "stage_id", run.stageID, "error", err)
+			// Close the request whatever failed, so nothing claims it again.
+			cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			if _, err := w.store.pool.Exec(cleanup, `UPDATE evaluations SET status = 'failed', failure_reason = $2, completed_at = now() WHERE id = $1 AND status IN ('pending','running')`, run.evaluationID, reason(err)); err != nil {
+				w.log.Error("close failed grading request", "error", err)
+			}
+			cancel()
 		}
 	}
 }
 
-// claimable finds active automated_evaluation stages with no current AI
-// evaluation. The absence of a completed evaluation is the claim: nothing is
-// marked in flight, so a crash mid-grade simply means the next tick tries
-// again, and openEvaluation supersedes rather than duplicating.
-func (w *Worker) claimable(ctx context.Context) ([]pendingStage, error) {
+// claimable lists pending requests whose stage can still be graded. A request
+// whose stage moved on is closed by grade, not left to be claimed forever.
+func (w *Worker) claimable(ctx context.Context) ([]pendingRun, error) {
 	rows, err := w.store.pool.Query(ctx, `
-		SELECT s.id, s.organization_id, s.assignment_id, s.stage_id,
+		SELECT e.id, s.id, s.organization_id, s.assignment_id, s.stage_id,
 		       coalesce(spec_stage.value -> 'config', 'null'::jsonb)
-		FROM assignment_stages s
-		JOIN assignments a        ON a.id = s.assignment_id
-		JOIN assessments ass      ON ass.id = a.assessment_id
+		FROM evaluations e
+		JOIN assignment_stages s ON s.assignment_id = e.assignment_id
+		 AND s.organization_id = e.organization_id AND s.stage_id = e.stage_id
+		JOIN assignments a        ON a.id = s.assignment_id AND a.organization_id = s.organization_id
+		JOIN assessments ass      ON ass.id = a.assessment_id AND ass.organization_id = a.organization_id
 		JOIN assessment_template_versions tv ON tv.id = ass.template_version_id
 		LEFT JOIN LATERAL (
 			SELECT value FROM jsonb_array_elements(tv.stages) AS value
 			WHERE value ->> 'id' = s.stage_id
 			LIMIT 1
 		) AS spec_stage ON true
-		WHERE s.stage_kind = 'automated_evaluation'
-		  AND s.status = 'active'
-		  AND NOT EXISTS (SELECT 1 FROM assignment_stages prior
-		      WHERE prior.assignment_id=s.assignment_id AND prior.organization_id=s.organization_id
-		      AND prior.sort_order<s.sort_order AND prior.status NOT IN ('completed','expired','skipped','failed'))
-		  -- Backoff. A stage that just failed fails the same way on the next
-		  -- tick, and a 20s retry loop over a model call pins the GPU for as
-		  -- long as the cause survives. Ten minutes is long enough to fix a
-		  -- binding and short enough that nobody waits on it.
-		  AND NOT EXISTS (SELECT 1 FROM evaluations e
-		      WHERE e.organization_id = s.organization_id
-		        AND e.assignment_id = s.assignment_id
-		        AND e.stage_id = s.stage_id
-		        AND e.evaluator_kind = 'ai'
-		        AND e.status = 'failed'
-		        AND e.completed_at > now() - interval '10 minutes')
-		ORDER BY s.started_at
+		WHERE e.status = 'pending' AND e.evaluator_kind = 'ai'
+		ORDER BY e.created_at
 		LIMIT 3`)
 	if err != nil {
-		return nil, fmt.Errorf("query pending evaluations: %w", err)
+		return nil, fmt.Errorf("query requested evaluations: %w", err)
 	}
 	defer rows.Close()
 
-	var out []pendingStage
+	var out []pendingRun
 	for rows.Next() {
-		var st pendingStage
-		if err := rows.Scan(&st.stageRowID, &st.orgID, &st.assignmentID,
-			&st.stageID, &st.config); err != nil {
-			return nil, fmt.Errorf("scan pending evaluation: %w", err)
+		var run pendingRun
+		if err := rows.Scan(&run.evaluationID, &run.stageRowID, &run.orgID, &run.assignmentID,
+			&run.stageID, &run.config); err != nil {
+			return nil, fmt.Errorf("scan requested evaluation: %w", err)
 		}
-		out = append(out, st)
+		out = append(out, run)
 	}
 	return out, rows.Err()
 }
 
-func (w *Worker) grade(ctx context.Context, st pendingStage) error {
-	ctx, cancel := context.WithTimeout(ctx, 15*time.Minute)
+var errStageClosed = errors.New("the stage can no longer be graded")
+
+func (w *Worker) grade(ctx context.Context, run pendingRun) error {
+	// Waiting out a live round counts against this budget.
+	ctx, cancel := context.WithTimeout(ctx, 45*time.Minute)
 	defer cancel()
 	var cfg spec.AutomatedEvaluationConfig
-	if len(st.config) > 0 {
-		// A config that will not decode is a template problem, not a reason
-		// to skip the grade: every criterion is then in scope.
-		if err := json.Unmarshal(st.config, &cfg); err != nil {
+	if len(run.config) > 0 {
+		if err := json.Unmarshal(run.config, &cfg); err != nil {
 			return fmt.Errorf("decode evaluation config: %w", err)
 		}
 	}
-
-	started := time.Now()
-	var completed bool
-	if err := w.store.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM evaluations WHERE organization_id = $1 AND assignment_id = $2 AND stage_id = $3 AND evaluator_kind = 'ai' AND status = 'completed')`, st.orgID, st.assignmentID, st.stageID).Scan(&completed); err != nil {
+	if _, err := gradable(ctx, w.store.pool, run.orgID, run.assignmentID); errors.Is(err, pgx.ErrNoRows) {
+		return errStageClosed
+	} else if err != nil {
 		return err
 	}
-	if !completed {
-		res, err := w.store.GradeSubmission(ctx, Target{
-			OrganizationID: st.orgID,
-			AssignmentID:   st.assignmentID,
-			StageID:        st.stageID,
-			RubricScope:    cfg.RubricScope,
-			Sources:        cfg.Sources,
-		})
-		if err != nil {
-			return err
-		}
 
-		w.log.Info("graded submission",
-			"assignment_id", st.assignmentID, "stage_id", st.stageID,
-			"scored", res.Scored, "total", res.WeightedTotal, "max", res.MaxTotal,
-			"caveats", len(res.Caveats), "took", time.Since(started))
+	started := time.Now()
+	res, err := w.store.GradeSubmission(ctx, Target{
+		OrganizationID: run.orgID,
+		AssignmentID:   run.assignmentID,
+		StageID:        run.stageID,
+		RubricScope:    cfg.RubricScope,
+		Sources:        cfg.Sources,
+		EvaluationID:   run.evaluationID,
+	})
+	if err != nil {
+		return err
 	}
+	w.log.Info("graded submission",
+		"assignment_id", run.assignmentID, "stage_id", run.stageID,
+		"scored", res.Scored, "total", res.WeightedTotal, "max", res.MaxTotal,
+		"caveats", len(res.Caveats), "took", time.Since(started))
 
 	// The engine decides the transition, as it does for every other state
 	// change. The grader supplies a result; it does not advance anything.
-	err := w.engine.Apply(ctx, workflow.Request{
+	err = w.engine.Apply(ctx, workflow.Request{
 		Subject:        workflow.SubjectStage,
-		SubjectID:      st.stageRowID,
-		OrganizationID: st.orgID,
+		SubjectID:      run.stageRowID,
+		OrganizationID: run.orgID,
 		To:             workflow.StageCompleted,
 		Cause:          "evaluation_completed",
 		Actor:          workflow.SystemActor(),

@@ -47,6 +47,11 @@ type ChatRequest struct {
 	// It matters because a reasoning model spends MaxTokens on its thinking
 	// before it writes any answer at all.
 	ReasoningEffort string
+
+	// JSON constrains decoding to a JSON object where the provider supports
+	// it. A small model asked for JSON in prose drifts into prose; a grammar
+	// cannot.
+	JSON bool
 }
 
 type ChatResponse struct {
@@ -141,6 +146,11 @@ func (c *Client) Chat(ctx context.Context, req ChatRequest) (ChatResponse, error
 	if req.ReasoningEffort != "" {
 		body["reasoning_effort"] = req.ReasoningEffort
 	}
+	// Anthropic's compatibility layer ignores response_format; the prompt
+	// still asks for JSON there.
+	if req.JSON && c.provider.Kind != "anthropic" {
+		body["response_format"] = map[string]string{"type": "json_object"}
+	}
 
 	var out struct {
 		Model   string `json:"model"`
@@ -171,6 +181,12 @@ func (c *Client) Chat(ctx context.Context, req ChatRequest) (ChatResponse, error
 	if strings.TrimSpace(out.Choices[0].Message.Content) == "" && out.Choices[0].FinishReason == "length" {
 		return ChatResponse{Latency: latency, OutputTokens: out.Usage.CompletionTokens},
 			&Error{Detail: fmt.Sprintf("response hit max_tokens (%d) before the answer began; a reasoning model needs a larger max_tokens", req.MaxTokens)}
+	}
+	// Cut off mid-object, the reply cannot parse and a repair round would be
+	// cut off at the same place.
+	if req.JSON && out.Choices[0].FinishReason == "length" {
+		return ChatResponse{Latency: latency, InputTokens: out.Usage.PromptTokens, OutputTokens: out.Usage.CompletionTokens},
+			fmt.Errorf("%w: response hit max_tokens (%d) before the JSON closed", ErrUnstructured, req.MaxTokens)
 	}
 
 	return ChatResponse{

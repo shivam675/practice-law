@@ -18,6 +18,7 @@ import { ModelSettings } from "./routes/ModelSettings";
 import { AiProfiles } from "./routes/AiProfiles";
 import { Dashboard } from "./routes/Dashboard";
 import { People } from "./routes/People";
+import { RoundFeedbackList } from "./routes/Feedback";
 import { Spinner } from "./ui/Feedback";
 
 const queryClient = new QueryClient({
@@ -83,6 +84,7 @@ function Router() {
         <Route path="/teams" element={<Teams />} />
         <Route path="/templates" element={<Templates />} />
         <Route path="/rubrics" element={<Rubrics />} />
+        <Route path="/feedback" element={<RoundFeedbackList />} />
         <Route path="/admin/actors" element={<AiProfiles />} />
         <Route path="/admin/models" element={<ModelSettings />} />
         <Route path="/admin/users" element={<People />} />

@@ -24,10 +24,35 @@ import (
 )
 
 func main() {
+	// The runtime image is distroless, with no curl for a container
+	// healthcheck, so the binary checks itself.
+	if len(os.Args) > 1 && os.Args[1] == "-healthcheck" {
+		os.Exit(healthcheck())
+	}
 	if err := run(); err != nil {
 		slog.Error("fatal", "error", err)
 		os.Exit(1)
 	}
+}
+
+func healthcheck() int {
+	addr := os.Getenv("API_HTTP_ADDR")
+	if addr == "" || addr[0] == ':' {
+		addr = "127.0.0.1" + addr
+	}
+	if addr == "127.0.0.1" {
+		addr += ":8080"
+	}
+	client := http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Get("http://" + addr + "/healthz")
+	if err != nil {
+		return 1
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return 1
+	}
+	return 0
 }
 
 func run() error {

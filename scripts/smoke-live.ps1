@@ -47,7 +47,9 @@ $detail=Call GET "/assignments/$($assignment.id)" $admin
 Check (($detail.stages|Where-Object stage_id -eq 'evaluation').status -eq 'pending') 'Evaluation waits for the active oral stage'
 Denied 400 { Call POST "/assignments/$($assignment.id)/stages/oral/session" $student @{consent=$false} }
 Denied 404 { Call POST "/assignments/$($assignment.id)/stages/oral/session" $other @{consent=$true} }
-$joined=Call POST "/assignments/$($assignment.id)/stages/oral/session" $student @{consent=$true}
+# The speech ticket is bound to the client address. smoke_speech.py connects from
+# inside the media container, so the join claims that address.
+$joined=Call POST "/assignments/$($assignment.id)/stages/oral/session" ($student + @{'X-Forwarded-For'='127.0.0.1'}) @{consent=$true}
 $rejoined=Call POST "/assignments/$($assignment.id)/stages/oral/session" $student @{consent=$true}
 Check ($joined.id -eq $rejoined.id) 'Reconnect reuses the same session'
 if ($Speech) {
@@ -58,11 +60,15 @@ if ($Speech) {
 }
 $mediaSecret=$settings.MEDIA_SERVICE_TOKEN
 if (-not $mediaSecret) { $mediaSecret='local_speech_development_only_change_me' }
-$ticket=@{Authorization="Bearer $($joined.ticket)";'X-Media-Service-Token'=$mediaSecret}
+# Media routes take the session token the speech service gets by exchanging a
+# fresh single-use ticket, exactly as on a real connection.
+$fresh=Call POST "/assignments/$($assignment.id)/stages/oral/session" ($student + @{'X-Forwarded-For'='127.0.0.1'}) @{consent=$true}
+$exchange=Invoke-RestMethod "$base/media/session" -Headers @{Authorization="Bearer $($fresh.ticket)";'X-Media-Service-Token'=$mediaSecret;'X-Speech-Client-IP'='127.0.0.1'}
+$ticket=@{Authorization="Bearer $($exchange.media_token)";'X-Media-Service-Token'=$mediaSecret}
 $turn=@{id=[guid]::NewGuid().ToString();text=$text;duration_ms=15000}
 $before=Call GET "/sessions/$($joined.id)" $student
 $beforeCount=@($before.transcript | Where-Object speaker -ne 'Examiner').Count
-Denied 401 { Call POST '/media/turn' @{Authorization="Bearer $($joined.ticket)"} $turn }
+Denied 401 { Call POST '/media/turn' @{Authorization="Bearer $($exchange.media_token)"} $turn }
 $reply=Call POST '/media/turn' $ticket $turn
 Check $reply.saved 'Transcript persisted'
 Call POST '/media/turn' $ticket $turn | Out-Null
@@ -81,7 +87,19 @@ $hidden=Call GET "/assignments/$($assignment.id)/report" $student
 Check ($hidden.status -eq 'unpublished' -and $hidden.scores.Count -eq 0) 'Draft scores are hidden from the student'
 Call POST "/sessions/$($joined.id)/end" $student | Out-Null
 Denied 409 {Call POST '/media/turn' $ticket @{id=[guid]::NewGuid().ToString();text='late turn';duration_ms=1000}}
-foreach($i in 1..300){$report=Call GET "/assignments/$($assignment.id)/report" $teacher;if($report.scores.Count -gt 0){break};Start-Sleep -Seconds 2}
+Call POST "/sessions/$($joined.id)/feedback" $student @{rating=4;relevance='yes';interruptions='about_right';problems=@('audio');comment='Development smoke feedback.'} | Out-Null
+Check ((Call GET "/sessions/$($joined.id)/feedback/mine" $student).feedback.rating -eq 4) 'Student feedback saved after the round'
+Denied 404 {Call POST "/sessions/$($joined.id)/feedback" $other @{rating=1;relevance='no';interruptions='too_many';problems=@();comment=''}}
+Check (@((Call GET '/feedback' $teacher).feedback | Where-Object session_id -eq $joined.id).Count -eq 1) 'Teacher reads the round feedback'
+Start-Sleep -Seconds 8
+$progress=Call GET "/assignments/$($assignment.id)/grading" $teacher
+Check ($progress.status -eq 'none' -and $progress.can_start) 'Grading waits for the teacher to press Autograde'
+Denied 403 {Call POST "/assignments/$($assignment.id)/grading" $student @{}}
+Call POST "/assignments/$($assignment.id)/grading" $teacher @{} | Out-Null
+Denied 409 {Call POST "/assignments/$($assignment.id)/grading" $teacher @{}}
+foreach($i in 1..150){$progress=Call GET "/assignments/$($assignment.id)/grading" $teacher;if($progress.status -in @('completed','failed')){break};Start-Sleep -Seconds 2}
+Check ($progress.status -eq 'completed') "Autograde completed: $($progress.failure_reason)"
+$report=Call GET "/assignments/$($assignment.id)/report" $teacher
 Check ($report.scores.Count -eq 1) 'Configured source stages graded'
 Denied 403 {Call POST "/assignments/$($assignment.id)/report/publish" $student @{notes='Student cannot publish'}}
 $score=$report.scores[0]

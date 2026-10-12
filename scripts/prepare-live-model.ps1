@@ -3,7 +3,8 @@ param([string]$SourceModel = 'qwen3:4b-instruct-2507-q4_K_M', [string]$Model = '
 $ErrorActionPreference = 'Stop'
 $source = Invoke-RestMethod -Uri "$OllamaUrl/api/show" -Method Post -ContentType 'application/json' -Body (@{ model = $SourceModel } | ConvertTo-Json)
 if ($source.model_info.'general.finetune' -match 'Thinking' -or ($source.thinking -and $false -notin $source.thinking.values)) { throw 'This model requires thinking. Use the Qwen3 Instruct variant for live judging.' }
-$created = Invoke-RestMethod -Uri "$OllamaUrl/api/create" -Method Post -ContentType 'application/json' -TimeoutSec 60 -Body (@{ model = $Model; from = $SourceModel; stream = $false } | ConvertTo-Json -Depth 5)
+# The bounded live context fits here; a 64K cache needlessly occupies this GPU.
+$created = Invoke-RestMethod -Uri "$OllamaUrl/api/create" -Method Post -ContentType 'application/json' -TimeoutSec 60 -Body (@{ model = $Model; from = $SourceModel; parameters = @{ num_ctx = 16384 }; stream = $false } | ConvertTo-Json -Depth 5)
 if ($created.status -ne 'success') { throw 'The live model alias could not be created.' }
 $probe = @{ model = $Model; messages = @(@{ role = 'user'; content = 'Return only JSON {"ready":true}. /no_think' }); max_tokens = 40; temperature = 0; reasoning_effort = 'none' }
 $watch = [Diagnostics.Stopwatch]::StartNew()

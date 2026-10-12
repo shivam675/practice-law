@@ -21,12 +21,13 @@ from faster_whisper import WhisperModel
 from faster_whisper.vad import VadOptions, get_speech_timestamps
 from paradee import Paradee, SAMPLE_RATE
 
+logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO").upper(), format="%(asctime)s %(levelname)s %(name)s %(message)s")
 log = logging.getLogger("media")
 RATE = 16000
 TOKEN = os.environ["MEDIA_SERVICE_TOKEN"]
 API = os.environ.get("CONTROL_API_URL", "http://api:8080/api/v1")
 ORIGINS = os.environ.get("MEDIA_ORIGINS", "http://localhost:5173").split(",")
-CAPACITY = int(os.environ.get("MAX_CONCURRENT_LIVE_SESSIONS", "3"))
+CAPACITY = int(os.environ.get("MAX_CONCURRENT_LIVE_SESSIONS", "2"))  # The API reads the same variable.
 # Endpointing: a long pause ends a turn, a short one does not interrupt a thinker.
 END_SILENCE = float(os.environ.get("STT_END_SILENCE_SECONDS", "1.2"))
 # How often the text on screen is refreshed while someone is still talking.
@@ -58,6 +59,9 @@ def load_models():
     except Exception:
         load_error = "Speech models could not load. Check the media service logs."
         log.exception("load speech models")
+        # A process that stays up without models is never restarted. Exit, and
+        # let the restart policy try again.
+        os._exit(1)
 
 
 @asynccontextmanager
@@ -141,7 +145,10 @@ async def judge(ws, client, floor=None, *, speaking=False):
         response.raise_for_status()
         result = response.json()
         if result.get("warning"):
-            await ws.send_json({"type": "warning", "message": result["warning"]})
+            await ws.send_json({"type": "judge_warning", "message": result["warning"]})
+        else:
+            # Clears a stale judge warning without touching microphone errors.
+            await ws.send_json({"type": "judge_ok"})
         question = result.get("question")
         if question:
             if floor is not None:
@@ -157,7 +164,7 @@ async def judge(ws, client, floor=None, *, speaking=False):
                 await ws.send_json({"type": "judge_audio_end"})
     except (httpx.HTTPError, RuntimeError):
         log.exception("judge request failed")
-        await ws.send_json({"type": "warning", "message": "The judge is unavailable. Your transcript was saved."})
+        await ws.send_json({"type": "judge_warning", "message": "The judge is temporarily unavailable. Keep going: your speech is being saved."})
 
 
 async def receive_audio(ws, queue, deadline=None, floor=None):
@@ -342,7 +349,7 @@ async def speech(ws: WebSocket):
         log.exception("speech connection failed")
         try:
             await ws.send_json({"type": "error", "message": "Speech connection failed. Saved turns remain available. Reconnect to continue."})
-        except RuntimeError:
+        except (RuntimeError, WebSocketDisconnect):
             pass
     finally:
         for task in tasks:
@@ -353,5 +360,7 @@ async def speech(ws: WebSocket):
                 await task
         if registered:
             connections.discard(identity)
-        with contextlib.suppress(RuntimeError):
+        # A browser that already hung up makes close raise; there is nobody
+        # left to tell.
+        with contextlib.suppress(RuntimeError, WebSocketDisconnect):
             await ws.close()

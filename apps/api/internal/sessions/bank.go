@@ -76,8 +76,10 @@ func prepareBank(ctx context.Context, pool *pgxpool.Pool, h *harness.Harness) (e
 			_ = conn.Conn().Close(cleanup)
 		}
 	}()
-	var live bool
-	if err = conn.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM sessions WHERE status IN ('running','paused','degraded'))`).Scan(&live); err != nil || live {
+	// Live rounds and a teacher's grading run both come first on the GPU.
+	var busy bool
+	if err = conn.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM sessions WHERE status IN ('running','paused','degraded'))
+		OR EXISTS(SELECT 1 FROM evaluations WHERE evaluator_kind='ai' AND status IN ('pending','running'))`).Scan(&busy); err != nil || busy {
 		return err
 	}
 	if _, err = conn.Exec(ctx, `
@@ -114,8 +116,9 @@ func prepareBank(ctx context.Context, pool *pgxpool.Pool, h *harness.Harness) (e
 	err = conn.QueryRow(ctx, `
 		WITH next AS (
 			SELECT id FROM question_bank_jobs
-			WHERE (status IN ('pending','failed') AND run_at <= now())
-			   OR (status = 'running' AND updated_at < now() - interval '5 minutes')
+			WHERE ((status IN ('pending','failed') AND run_at <= now())
+			   OR (status = 'running' AND updated_at < now() - interval '5 minutes'))
+			  AND attempts < $1
 			ORDER BY run_at
 			FOR UPDATE SKIP LOCKED
 			LIMIT 1
@@ -124,7 +127,7 @@ func prepareBank(ctx context.Context, pool *pgxpool.Pool, h *harness.Harness) (e
 		SET status = 'running', attempts = j.attempts + 1, last_error = NULL
 		FROM next WHERE j.id = next.id
 		RETURNING j.id, j.organization_id, j.assessment_id, j.assignment_id,
-		          j.side, j.attempts`).
+		          j.side, j.attempts`, bankMaxAttempts).
 		Scan(&job.ID, &job.OrganizationID, &job.AssessmentID, &job.AssignmentID,
 			&job.Side, &job.Attempts)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -139,20 +142,25 @@ func prepareBank(ctx context.Context, pool *pgxpool.Pool, h *harness.Harness) (e
 		}
 		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cancel()
+		// A shutdown is not the job's failure: hand the attempt back.
+		retry, spent := bankRetryDelay(job.Attempts).String(), 0
+		if errors.Is(err, context.Canceled) {
+			retry, spent = "0 seconds", 1
+		}
 		_, updateErr := conn.Exec(cleanup, `
 			UPDATE question_bank_jobs
-			SET status = 'failed', run_at = now() + $2::interval, last_error = $3
-			WHERE id = $1`, job.ID, bankRetryDelay(job.Attempts).String(), err.Error())
+			SET status = 'failed', run_at = now() + $2::interval, last_error = $3, attempts = attempts - $4
+			WHERE id = $1`, job.ID, retry, err.Error(), spent)
 		if updateErr != nil {
 			err = errors.Join(err, fmt.Errorf("record question bank failure: %w", updateErr))
 		}
 	}()
 
 	var materials string
-	err = conn.QueryRow(ctx, `SELECT coalesce(left(string_agg(body,E'\n'),48000),'') FROM (
- SELECT k.title||E'\n'||d.extracted_text body FROM knowledge_sources k JOIN documents d ON d.knowledge_source_id=k.id AND d.organization_id=k.organization_id WHERE k.organization_id=$1 AND k.assessment_id=$2 AND d.parse_status='parsed' AND k.visibility<>'staff' AND (k.visibility='all' OR ($3::uuid IS NOT NULL AND k.visibility=$4))
- UNION ALL SELECT d.extracted_text FROM artifacts ar JOIN documents d ON d.id=ar.document_id AND d.organization_id=ar.organization_id WHERE ar.organization_id=$1 AND ar.assignment_id=$3 AND d.parse_status='parsed'
- ) sources`, job.OrganizationID, job.AssessmentID, job.AssignmentID, job.Side).Scan(&materials)
+	err = conn.QueryRow(ctx, `SELECT coalesce(left(string_agg(body,E'\n' ORDER BY ord),$5),'') FROM (
+ SELECT CASE WHEN k.kind='problem' THEN 0 ELSE 1 END ord,k.title||E'\n'||d.extracted_text body FROM knowledge_sources k JOIN documents d ON d.knowledge_source_id=k.id AND d.organization_id=k.organization_id WHERE k.organization_id=$1 AND k.assessment_id=$2 AND d.parse_status='parsed' AND k.visibility<>'staff' AND (k.visibility='all' OR ($3::uuid IS NOT NULL AND k.visibility=$4))
+ UNION ALL SELECT 2,d.extracted_text FROM artifacts ar JOIN documents d ON d.id=ar.document_id AND d.organization_id=ar.organization_id WHERE ar.organization_id=$1 AND ar.assignment_id=$3 AND d.parse_status='parsed'
+ ) sources`, job.OrganizationID, job.AssessmentID, job.AssignmentID, job.Side, bankMaterialChars).Scan(&materials)
 	if err != nil {
 		return err
 	}
@@ -179,6 +187,15 @@ func prepareBank(ctx context.Context, pool *pgxpool.Pool, h *harness.Harness) (e
 	err = tx.Commit(ctx)
 	return err
 }
+
+// bankMaxAttempts stops a job that keeps failing. Prepared questions are an
+// optimisation; the live judge writes its own without them, and a model that
+// cannot produce them must not be asked again every hour forever.
+const bankMaxAttempts = 5
+
+// bankMaterialChars bounds the prompt to roughly three thousand tokens, problem
+// first. A small model asked about fifty pages writes about none of them.
+const bankMaterialChars = 12000
 
 func bankRetryDelay(attempt int) time.Duration {
 	delay := time.Minute << min(max(attempt-1, 0), 6)

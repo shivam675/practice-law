@@ -112,7 +112,9 @@ func Load() (Config, error) {
 
 	c.CookieSecure = envBool("COOKIE_SECURE", false)
 	c.S3ForcePathStyle = envBool("S3_FORCE_PATH_STYLE", true)
-	c.MaxConcurrentLiveSessions = envInt("MAX_CONCURRENT_LIVE_SESSIONS", 4)
+	// One GPU, CPU speech recognition shared by every room: two rooms is what
+	// the pilot box carries. Media reads the same variable; keep them equal.
+	c.MaxConcurrentLiveSessions = envInt("MAX_CONCURRENT_LIVE_SESSIONS", 2)
 
 	var err error
 	if c.AccessTokenTTL, err = envDuration("ACCESS_TOKEN_TTL", 10*time.Minute); err != nil {
@@ -176,8 +178,13 @@ func Load() (Config, error) {
 	if c.AIServiceToken == "" {
 		return c, fmt.Errorf("AI_SERVICE_TOKEN is required; it authenticates the control plane to the AI plane")
 	}
-	if c.IsProduction() && strings.Contains(c.AIServiceToken, "change_me") {
-		return c, fmt.Errorf("AI_SERVICE_TOKEN still holds the development placeholder")
+	if c.IsProduction() && (len(c.AIServiceToken) < 32 || strings.Contains(c.AIServiceToken, "change_me")) {
+		return c, fmt.Errorf("AI_SERVICE_TOKEN must contain at least 32 characters and must not use the development value in production")
+	}
+	// The database password is in .env.example; DATABASE_URL, when set, wins
+	// over POSTGRES_PASSWORD and usually still carries it.
+	if c.IsProduction() && strings.Contains(c.DatabaseURL, "megamoot_dev_password") {
+		return c, fmt.Errorf("the database password is the development value; unset DATABASE_URL and set POSTGRES_PASSWORD")
 	}
 
 	return c, nil

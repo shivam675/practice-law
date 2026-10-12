@@ -56,6 +56,35 @@ func (h *Handlers) Regrade(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, r, 200, map[string]bool{"saved": true})
 }
 
+// Autograde queues grading at a teacher's request. The worker runs it between
+// live rounds; the page polls GradingProgress to watch it.
+func (h *Handlers) Autograde(w http.ResponseWriter, r *http.Request) {
+	id, org, err := h.access(r)
+	if err != nil {
+		httpx.Fail(w, r, err)
+		return
+	}
+	if err = h.grader.Request(r.Context(), org, id, auth.MustPrincipal(r.Context()).UserID); err != nil {
+		httpx.Fail(w, r, err)
+		return
+	}
+	h.GradingProgress(w, r)
+}
+
+func (h *Handlers) GradingProgress(w http.ResponseWriter, r *http.Request) {
+	id, org, err := h.access(r)
+	if err != nil {
+		httpx.Fail(w, r, err)
+		return
+	}
+	out, err := h.grader.Progress(r.Context(), org, id)
+	if err != nil {
+		httpx.Fail(w, r, err)
+		return
+	}
+	httpx.JSON(w, r, 200, out)
+}
+
 type Score struct {
 	ID        uuid.UUID       `json:"id"`
 	Name      string          `json:"name"`

@@ -139,7 +139,13 @@ func SecurityHeaders(next http.Handler) http.Handler {
 func WriteDeadline(timeout time.Duration) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(timeout)); err != nil {
+			// The read side too: an upload on slow Wi-Fi is still arriving when
+			// the server-wide ReadTimeout would cut it off.
+			rc := http.NewResponseController(w)
+			if err := rc.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+				LoggerFrom(r.Context()).Warn("set route read deadline", "error", err)
+			}
+			if err := rc.SetWriteDeadline(time.Now().Add(timeout)); err != nil {
 				LoggerFrom(r.Context()).Warn("set route write deadline", "error", err)
 			}
 			next.ServeHTTP(w, r)

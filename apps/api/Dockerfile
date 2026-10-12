@@ -20,10 +20,15 @@ COPY go.mod go.sum* ./
 RUN go mod download
 COPY . .
 RUN go build -trimpath -ldflags="-s -w" -o /out/api ./cmd/api
+# Distroless has no shell to mkdir with. A named volume copies this directory,
+# ownership included, the first time it mounts, so uploads are writable.
+RUN mkdir -p /out/blobs
 
 # ---------- runtime ----------
 FROM gcr.io/distroless/static-debian12:nonroot AS runtime
 COPY --from=build /out/api /api
+COPY --from=build --chown=nonroot:nonroot /out/blobs /var/lib/megamoot/blobs
 USER nonroot:nonroot
 EXPOSE 8080
+HEALTHCHECK --interval=10s --timeout=4s --retries=5 CMD ["/api", "-healthcheck"]
 ENTRYPOINT ["/api"]

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { Scales } from "@phosphor-icons/react";
+import { FeedbackForm } from "../features/session/FeedbackForm";
 import { api, type Assignment } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { formatDuration, humanise } from "../lib/format";
@@ -20,6 +21,9 @@ export function SessionRoom() {
   const [checked, setChecked] = useState(false);
   const [state, setState] = useState("Not connected");
   const [error, setError] = useState<unknown>(null);
+  // Judge trouble is separate from microphone and connection errors, so the
+  // judge recovering clears its own warning and nothing else.
+  const [judgeNotice, setJudgeNotice] = useState("");
   const [partial, setPartial] = useState("");
   const [question, setQuestion] = useState("");
   const [level, setLevel] = useState(0);
@@ -116,7 +120,7 @@ export function SessionRoom() {
   }
   async function connect() {
     finishing.current = false;
-    setError(null); setBusy(true);
+    setError(null); setJudgeNotice(""); setBusy(true);
     try {
       if (!context.current) throw new Error("Check your microphone before joining.");
       const joined = await api.post<{ id: string; ticket: string; speech_path: string }>(`/assignments/${assignmentId}/stages/${stageId}/session`, { consent });
@@ -138,7 +142,9 @@ export function SessionRoom() {
         if (event.type === "transcript_final") { setPartial(event.text); if (!judgeSpeaking.current) setState("Examiner considering"); }
         if (event.type === "saved") { setPartial(""); if (!judgeSpeaking.current) setState("Listening"); void session.refetch(); }
         if (event.type === "drained") { finishing.current = true; stream.current?.getTracks().forEach((track) => track.stop()); setState("Speech saved"); void session.refetch(); }
-        if (event.type === "question") { judgeSpeaking.current = true; synthesisEnded.current = false; stopPlayback(); setState(`${event.speaker || "Examiner"} speaking`); setQuestion(event.text); setPartial(""); void session.refetch(); }
+        if (event.type === "judge_ok") setJudgeNotice("");
+        if (event.type === "judge_warning") setJudgeNotice(event.message);
+        if (event.type === "question") { setJudgeNotice(""); judgeSpeaking.current = true; synthesisEnded.current = false; stopPlayback(); setState(`${event.speaker || "Examiner"} speaking`); setQuestion(event.text); setPartial(""); void session.refetch(); }
         if (event.type === "judge_audio_end") { synthesisEnded.current = true; playNext(); }
         if (event.type === "error" || event.type === "warning") setError(new Error(event.message));
       };
@@ -186,8 +192,9 @@ export function SessionRoom() {
       </div>
     </header>
     <main className="mx-auto max-w-6xl px-5 py-8">
-      {error ? <ErrorState error={error} /> : null}{session.error ? <ErrorState error={session.error} /> : null}{assignment.error ? <ErrorState error={assignment.error} /> : null}
+      {error ? <ErrorState error={error} /> : null}{judgeNotice && !ended ? <Alert tone="warn" title="Judge">{judgeNotice}</Alert> : null}{session.error ? <ErrorState error={session.error} /> : null}{assignment.error ? <ErrorState error={assignment.error} /> : null}
       {ended ? <Alert tone="info" title="Your session has ended">The saved transcript is below. Results require teacher review before publication.</Alert> : null}
+      {ended && !observer ? <div className="mt-6"><FeedbackForm sessionId={sessionId} /></div> : null}
       <div className="mt-6 grid gap-8 lg:grid-cols-[minmax(260px,0.8fr)_minmax(0,1.2fr)]">
         <section><Surface className="p-6"><Scales size={48} className="text-accent" aria-hidden /><h1 className="mt-5 text-3xl">{observer ? "Session observation" : sessionId ? "Your oral round" : "Before you begin"}</h1><div className="mt-4"><Badge>{state}</Badge></div><p className="mt-5 text-sm leading-relaxed text-ink-muted">Wear headphones. Speak naturally and pause at the end of a point. The examiner’s question stays on screen.</p><div className="mt-6"><label htmlFor="mic-level" className="text-sm">Microphone level</label><meter id="mic-level" className="mt-3 h-3 w-full" min={0} max={1} value={level} /></div>
           {!ended && !observer && <div className="mt-6 space-y-4"><Button variant="secondary" disabled={busy || !!socket.current} onClick={() => void checkMicrophone()}>{checked ? "Check microphone again" : "Check microphone"}</Button><label className="flex items-start gap-3 text-sm"><input className="mt-1" type="checkbox" checked={consent} onChange={(e) => setConsent(e.target.checked)} />I agree to speech transcription and AI assessment. My teacher can review the saved transcript.</label><Button disabled={busy || !checked || !consent || !!socket.current} onClick={() => void connect()}>{sessionId ? "Reconnect" : "Begin session"}</Button>{sessionId && <Button variant="danger" disabled={busy} onClick={() => void end()}>Finish session</Button>}</div>}

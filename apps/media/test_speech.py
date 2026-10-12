@@ -19,7 +19,7 @@ class SpeechChecks(unittest.IsolatedAsyncioTestCase):
             await app.judge(ws, client, floor, speaking=True)
         self.assertTrue(floor.is_set())
         self.assertEqual(client.post.call_args.kwargs['params'], {"speaking": "true"})
-        self.assertEqual([c.args[0]['type'] for c in ws.send_json.call_args_list], ['question', 'judge_audio_end'])
+        self.assertEqual([c.args[0]['type'] for c in ws.send_json.call_args_list], ['judge_ok', 'question', 'judge_audio_end'])
 
     async def test_playback_ack_releases_floor_and_echo_is_discarded(self):
         floor = asyncio.Event()

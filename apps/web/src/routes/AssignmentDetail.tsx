@@ -225,8 +225,8 @@ function StageView({
 
       {stage.stage_kind === "automated_evaluation" ? (
         <Alert tone="info" title="Evaluation">
-          Marking runs against the rubric once the material it covers is in.
-          Results are released after a teacher has reviewed them.
+          Your teacher starts marking against the rubric once the material it
+          covers is in. Results are released after they have reviewed them.
         </Alert>
       ) : null}
 

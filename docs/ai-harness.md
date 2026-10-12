@@ -31,7 +31,7 @@ ledgered to `ai_requests` like any other call.
 ```
 ModelRouter       tier -> provider + model + params   platformcfg.Resolve  done
 ProviderAdapter   openai_compatible | anthropic         internal/llm         done
-StructuredGate    schema -> one repair retry -> reject  llm.Structured       done
+StructuredGate    JSON mode -> schema -> one repair -> reject  llm.Structured  done
 RequestLedger     tokens, latency, cost, prompt_version llm.Ledger           done
 CallHarness       untrusted blocks, routing, ledgering  internal/harness     done
 Retrieval         chunk, embed, hybrid search           internal/retrieval   done
@@ -153,9 +153,13 @@ memorial upload
   -> extract (sandboxed parser, no network, resource capped)
   -> format compliance checker (deterministic)
   -> chunk and embed into document_chunks
+  -> teacher presses Autograde; a pending evaluation is written
+  -> worker starts it when no live session runs, pauses between criteria
+     while one does
   -> per-criterion grading calls, grounded by retrieval
   -> quote verification
-  -> criterion_scores + evidence_spans persisted
+  -> criterion_scores + evidence_spans persisted, one criterion at a time,
+     so the teacher watches progress
   -> targeted question bank generation
 
 live session ends
@@ -165,6 +169,30 @@ live session ends
   -> human_review stage
   -> publish transition makes the report visible
 ```
+
+Grading never starts or retries by itself. A failed run stays failed until a
+teacher presses Autograde again, so a model that cannot do the job costs one
+attempt, not one every few minutes. A re-grade replaces the current result
+only when it completes.
+
+### Context budgets
+
+Small models lose the instructions in a long prompt. Every call is bounded:
+
+| Call | Budget |
+|---|---|
+| Grade one criterion | record up to 9,000 characters, plus 3 retrieved passages of 1,200 |
+| Live monitor and judge | case materials 6,000, last 12 turns up to 6,000, memory 600; monitor reply fits 256 tokens |
+| Question bank | materials 12,000, problem first |
+
+A longer record is not summarised by the model. Code keeps the opening passage
+of each stage, a list of headings, and the passages that share the most words
+with the criterion. Every kept passage is a verbatim slice, so evidence quotes
+still verify against the full record.
+
+Structured calls ask the provider for JSON mode (`response_format`), so a small
+model cannot drift into prose. A reply cut off at `max_tokens` is rejected
+without a repair round.
 
 ## Testing the AI layer
 

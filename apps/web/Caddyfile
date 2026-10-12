@@ -1,6 +1,17 @@
 {$DOMAIN} {
-	@health path /healthz /readyz
-	handle @health {
+	# Everything the page loads comes from this origin. The microphone is the
+	# one powerful feature it asks for, and only this origin may ask.
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self' data:; connect-src 'self' wss://{$DOMAIN}; worker-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
+		Permissions-Policy "microphone=(self), camera=(), geolocation=()"
+		X-Content-Type-Options nosniff
+		Referrer-Policy strict-origin-when-cross-origin
+		-Server
+	}
+
+	# Readiness lists dependency state; it stays inside the compose network.
+	handle /healthz {
 		reverse_proxy api:8080 {
 			header_up X-Forwarded-For {remote_host}
 		}

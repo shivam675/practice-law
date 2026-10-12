@@ -17,17 +17,6 @@ services:
       timeout: 3s
       retries: 10
 
-  redis:
-    image: redis:7-alpine
-    restart: unless-stopped
-    command: ["redis-server", "--appendonly", "no", "--save", ""]
-    networks: [backend]
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-
   api:
     build:
       context: ./apps/api
@@ -38,7 +27,9 @@ services:
     environment:
       APP_ENV: production
       POSTGRES_HOST: postgres
-      REDIS_URL: redis://redis:6379/0
+      # Read by the API and by media; the two must agree or a student is
+      # admitted to a room the speech service then refuses.
+      MAX_CONCURRENT_LIVE_SESSIONS: ${MAX_CONCURRENT_LIVE_SESSIONS:-2}
       AI_SERVICE_URL: http://ai:8100
       MEDIA_SERVICE_URL: http://media:8200
       API_PUBLIC_URL: https://${DOMAIN:?set DOMAIN}
@@ -52,10 +43,20 @@ services:
     volumes:
       - blobdata:/var/lib/megamoot/blobs
     networks: [backend, parsing]
+    # Ollama runs on the host, next to the GPU. Point the model provider at
+    # http://host.docker.internal:11434/v1 in Model settings, and start Ollama
+    # with OLLAMA_HOST=0.0.0.0 behind a firewall. See docs/deploy.md.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "/api", "-healthcheck"]
+      interval: 10s
+      timeout: 4s
+      retries: 5
+      start_period: 30s
+    mem_limit: 1g
     depends_on:
       postgres:
-        condition: service_healthy
-      redis:
         condition: service_healthy
       ai:
         condition: service_started
@@ -87,12 +88,21 @@ services:
       MEDIA_ORIGINS: https://${DOMAIN}
       STT_MODEL: ${STT_MODEL:-small.en}
       STT_DEVICE: ${STT_DEVICE:-cpu}
-    volumes:
-      - speechmodels:/models
+      MAX_CONCURRENT_LIVE_SESSIONS: ${MAX_CONCURRENT_LIVE_SESSIONS:-2}
+      # The models are baked into the image at build time.
+      HF_HUB_OFFLINE: "1"
+      LOG_LEVEL: ${LOG_LEVEL:-info}
     networks: [backend]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8200/readyz', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 120s
+    mem_limit: 4g
     depends_on:
       api:
-        condition: service_started
+        condition: service_healthy
 
   web:
     build:
@@ -112,9 +122,9 @@ services:
     networks: [backend]
     depends_on:
       api:
-        condition: service_started
+        condition: service_healthy
       media:
-        condition: service_started
+        condition: service_healthy
 
 networks:
   backend:
@@ -126,4 +136,3 @@ volumes:
   caddyconfig:
   caddydata:
   pgdata:
-  speechmodels:
